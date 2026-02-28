@@ -1,0 +1,50 @@
+{
+    "questions": {
+      "q1": {
+        "answerIndex": 2,
+        "choices": ["suddenly", "recently", "temporarily", "immediately"],
+        "exam": "toeic",
+        "explanation": "\"temporarily\" means for a limited time.",
+        "lang": "en",
+        "level": 5,
+        "prompt": "Choose the word that best completes the sentence: The meeting was ____ postponed due to bad weather."
+      },
+      "q2": {
+        "answerIndex": 1,
+        "choices": ["rarely", "frequently", "barely", "scarcely"],
+        "exam": "toeic",
+        "explanation": "\"frequently\" means often.",
+        "lang": "en",
+        "level": 5,
+        "prompt": "The team meets ____ to discuss project updates."
+      },
+      "q3": {
+        "answerIndex": 3,
+        "choices": ["cancel", "canceled", "cancelling", "to cancel"],
+        "exam": "toeic",
+        "explanation": "After \"decided,\" use infinitive form.",
+        "lang": "en",
+        "level": 6,
+        "prompt": "The manager decided ____ the conference."
+      },
+      "q4": {
+        "answerIndex": 0,
+        "choices": ["Although", "Because", "Therefore", "Despite"],
+        "exam": "toeic",
+        "explanation": "\"Although\" introduces contrast.",
+        "lang": "en",
+        "level": 6,
+        "prompt": "____ the delay, the project was completed on time."
+      },
+      "q5": {
+        "answerIndex": 2,
+        "choices": ["efficient", "efficiency", "efficiently", "efficiently done"],
+        "exam": "toeic",
+        "explanation": "Adverb modifies the verb.",
+        "lang": "en",
+        "level": 7,
+        "prompt": "The new system operates more ____ than before."
+      }
+    }
+}
+  

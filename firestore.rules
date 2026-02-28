@@ -1,0 +1,46 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // questions: 全員読み取り可能、書き込みは管理者のみ
+    match /questions/{questionId} {
+      allow read: if true;
+      allow write: if false;  // Cloud Functions経由のみ
+    }
+    
+    // matches: 参加者のみ読み取り可能
+    match /matches/{matchId} {
+      allow read: if request.auth != null && 
+        (resource.data.players.A == request.auth.uid || 
+         resource.data.players.B == request.auth.uid);
+      allow create: if request.auth != null;
+      allow update: if false;  // Cloud Functions経由のみ
+    }
+    
+    // users: 自分のデータのみ読み書き可能。レート・勝敗・ランクはサーバー権威のためクライアントからは書けない
+    match /users/{uid} {
+      allow read: if true;  // 表示名・レートなどは公開可
+      allow create: if request.auth != null && request.auth.uid == uid
+        && !request.resource.data.keys().hasAny([
+          'rating', 'ratingChoice', 'ratingDictation', 'ratingListening', 'ratingOverall',
+          'ratingChange', 'wins', 'losses', 'winsChoice', 'lossesChoice',
+          'winsDictation', 'lossesDictation', 'winsListening', 'lossesListening',
+          'rank', 'rankChoice', 'rankDictation', 'rankListening', 'rankOverall', 'createdAt']);
+      allow update: if request.auth != null && request.auth.uid == uid
+        && !request.resource.data.diff(resource.data).affectedKeys().hasAny([
+          'rating', 'ratingChoice', 'ratingDictation', 'ratingListening', 'ratingOverall',
+          'ratingChange', 'wins', 'losses', 'winsChoice', 'lossesChoice',
+          'winsDictation', 'lossesDictation', 'winsListening', 'lossesListening',
+          'rank', 'rankChoice', 'rankDictation', 'rankListening', 'rankOverall', 'createdAt']);
+    }
+    
+    // friendRequests: 自分が送った/受け取ったリクエストのみ読み取り可。作成・更新は Cloud Functions のみ
+    match /friendRequests/{requestId} {
+      allow read: if request.auth != null && 
+        (resource.data.toUid == request.auth.uid || resource.data.fromUid == request.auth.uid);
+      allow write: if false;
+    }
+  }
+}
+
+
