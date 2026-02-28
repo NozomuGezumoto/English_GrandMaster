@@ -140,3 +140,4 @@ English_Battle/
 
 詳細な設計は `DESIGN.md` を参照してください。
 
+"# English_GrandMaster" 
