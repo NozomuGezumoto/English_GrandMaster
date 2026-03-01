@@ -2,6 +2,7 @@ import { initializeApp, getApps, getApp, FirebaseApp } from "firebase/app";
 import { getFirestore, Firestore, connectFirestoreEmulator } from "firebase/firestore";
 import { getAuth, Auth, connectAuthEmulator } from "firebase/auth";
 import { getFunctions, Functions, httpsCallable, connectFunctionsEmulator } from "firebase/functions";
+import { getStorage, Storage, ref, uploadBytes, getDownloadURL, connectStorageEmulator } from "firebase/storage";
 import Constants from "expo-constants";
 
 // エミュレータポート（firebase.json と一致させること。変更時は docs/PORTS.md 参照）
@@ -24,9 +25,14 @@ const app: FirebaseApp = getApps().length === 0 ? initializeApp(firebaseConfig) 
 
 export const db: Firestore = getFirestore(app);
 export const auth: Auth = getAuth(app);
+export const storage: Storage = getStorage(app);
 
 // ローカルエミュレータを使用する場合（開発環境）
+// 参照元: Constants.expoConfig?.extra?.useEmulator（app.config.js で EXPO_PUBLIC_USE_EMULATOR === 'true' のとき true）
 const useEmulator = Constants.expoConfig?.extra?.useEmulator === true;
+
+// デバッグ: useEmulator の判定ロジック（401 調査用。本番で useEmulator=true だとエミュレータURLを叩いて 401 になる）
+console.log('[Firebase] useEmulator:', useEmulator, '| extra.useEmulator:', Constants.expoConfig?.extra?.useEmulator);
 
 // エミュレータのホスト（Web・iOSシミュレータはlocalhostでOK。実機の場合はPCのIPが必要）
 const getEmulatorHost = () => {
@@ -115,11 +121,21 @@ if (useEmulator) {
       connectAuthEmulator(auth, `http://${emulatorHost}:9099`, { disableWarnings: true });
       console.log(`[Firebase] Connected to Auth emulator at ${emulatorHost}:9099`);
     } catch (authError: any) {
-      // 既に接続済みの場合は無視
       if (authError.message && authError.message.includes('already')) {
         console.log('[Firebase] Auth emulator already connected');
       } else {
         console.warn('[Firebase] Auth emulator connection warning:', authError);
+      }
+    }
+    // Storage Emulatorの接続（ポート 9199）
+    try {
+      connectStorageEmulator(storage, emulatorHost, 9199);
+      console.log(`[Firebase] Connected to Storage emulator at ${emulatorHost}:9199`);
+    } catch (storageError: any) {
+      if (storageError?.message?.includes('already')) {
+        console.log('[Firebase] Storage emulator already connected');
+      } else {
+        console.warn('[Firebase] Storage emulator connection warning:', storageError);
       }
     }
     
@@ -129,10 +145,97 @@ if (useEmulator) {
     console.error('[Firebase] Emulator connection error:', error);
   }
 } else {
-  // 本番環境（Cloud Functions）
-  functionsInstance = getFunctions(app);
-  console.log('[Firebase] Using production Cloud Functions');
+  // 本番環境（Cloud Functions）。リージョン明示で unauthenticated 回避
+  functionsInstance = getFunctions(app, 'us-central1');
+  console.log('[Firebase] Using production Cloud Functions (us-central1)');
 }
 
 export const functions: Functions = functionsInstance;
 export { httpsCallable };
+
+/**
+ * Callable をトークン明示で呼ぶ（httpsCallable で unauthenticated になる場合の回避策）
+ * 401 の場合、匿名ログイン直後のトークン伝播待ちのため1回リトライする
+ */
+async function doCallFunctionWithAuth<T>(
+  name: string,
+  data: Record<string, unknown>,
+  token: string
+): Promise<{ ok: boolean; json: { result?: T; error?: { status?: string; message?: string } }; res: Response }> {
+  const projectId = Constants.expoConfig?.extra?.firebase?.projectId;
+  if (!projectId) throw new Error('Firebase projectId not configured');
+
+  const region = 'us-central1';
+  const url = useEmulator
+    ? `http://${getEmulatorHost()}:${typeof window !== 'undefined' ? 5052 : 5001}/${projectId}/${region}/${name}`
+    : `https://${region}-${projectId}.cloudfunctions.net/${name}`;
+
+  // デバッグ: 401 調査用（叩いている URL、トークン有無）
+  const hasToken = !!token && token.length > 10;
+  console.log('[Firebase] callFunctionWithAuth:', {
+    name,
+    url,
+    hasToken,
+    tokenLength: token?.length ?? 0,
+    useEmulator,
+  });
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({ data }),
+  });
+
+  // デバッグ: 401 時は body の詳細を確認
+  const text = await res.text();
+  let json: { result?: T; error?: { status?: string; message?: string; details?: unknown } };
+  try {
+    json = text ? JSON.parse(text) : {};
+  } catch {
+    json = {};
+    if (res.status === 401) console.log('[Firebase] 401 body (raw):', text?.substring(0, 300));
+  }
+  if (res.status === 401) {
+    console.log('[Firebase] 401 details:', { url, status: res.status, error: json?.error, bodyPreview: text?.substring(0, 200) });
+  }
+  return { ok: res.ok && !json.error, json, res };
+}
+
+export async function callFunctionWithAuth<T = unknown>(
+  name: string,
+  data: Record<string, unknown>
+): Promise<T> {
+  const user = auth.currentUser;
+  if (!user) throw new Error('User must be signed in');
+
+  let token = await user.getIdToken(true);
+  if (!token || token.length < 10) {
+    console.error('[Firebase] callFunctionWithAuth: token empty or invalid', { tokenLength: token?.length });
+    throw new Error('Failed to get auth token');
+  }
+  let { ok, json, res } = await doCallFunctionWithAuth<T>(name, data, token);
+
+  // 401: 匿名ログイン直後はトークン伝播に遅れがあることがある → 少し待ってリトライ
+  if (!ok && res.status === 401) {
+    await new Promise((r) => setTimeout(r, 800));
+    token = await user.getIdToken(true);
+    const retry = await doCallFunctionWithAuth<T>(name, data, token);
+    ok = retry.ok;
+    json = retry.json;
+    res = retry.res;
+  }
+
+  if (!ok || json.error) {
+    const err = json.error || {};
+    const msg = err.message || err.status || `Request failed: ${res.status}`;
+    const code = err.status ? `functions/${err.status.toLowerCase()}` : 'functions/unknown';
+    const e = new Error(msg) as Error & { code?: string };
+    e.code = code;
+    throw e;
+  }
+
+  return json.result as T;
+}

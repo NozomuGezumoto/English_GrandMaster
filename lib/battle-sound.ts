@@ -6,6 +6,7 @@
 import { Platform } from 'react-native';
 import { Asset } from 'expo-asset';
 import { ensureAudioModeForSpeech } from './audio-mode';
+import { syncWebAudioToDefaultOutput } from './web-audio-utils';
 
 type SoundLike = { setPositionAsync: (n: number) => Promise<void>; playAsync: () => Promise<void>; unloadAsync: () => Promise<void> };
 
@@ -70,7 +71,7 @@ export function playBattleSound(): void {
     const a = getWebBattleAudio();
     if (a) {
       a.currentTime = 0;
-      a.play().catch(() => {});
+      syncWebAudioToDefaultOutput(a).then(() => a.play().catch(() => {}));
     }
     return;
   }

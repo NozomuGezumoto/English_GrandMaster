@@ -1,8 +1,10 @@
 import { View, Text, StyleSheet, TextInput, TouchableOpacity, Alert, ActivityIndicator, Image, Platform, ScrollView } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { useState } from 'react';
 import Constants from 'expo-constants';
 import { auth, functions } from '../lib/firebase';
+import { uploadAvatarToStorage } from '../lib/avatar-utils';
 import { httpsCallable } from 'firebase/functions';
 import { createUserWithEmailAndPassword, updateProfile } from 'firebase/auth';
 import { User as FirestoreUser } from '../types/firestore';
@@ -11,10 +13,13 @@ import { COLORS } from '../lib/theme';
 
 export default function LoginScreen() {
   const router = useRouter();
+  const insets = useSafeAreaInsets();
+  const safeTop = 20 + insets.top;
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [displayName, setDisplayName] = useState('');
   const [avatarUri, setAvatarUri] = useState<string | null>(null);
+  const [avatarMimeType, setAvatarMimeType] = useState<string>('image/jpeg');
   const [selectedCountry, setSelectedCountry] = useState<string>('JP');
   const [showCountryPicker, setShowCountryPicker] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -41,27 +46,43 @@ export default function LoginScreen() {
         return;
       }
 
-      // モバイルではexpo-image-pickerを使用
+      // モバイルではexpo-image-pickerを使用（動的インポートでネイティブモジュール未対応時も画面は表示される）
       const ImagePicker = await import('expo-image-picker');
-      const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      const requestPerms = ImagePicker.requestMediaLibraryPermissionsAsync ?? (ImagePicker as any).default?.requestMediaLibraryPermissionsAsync;
+      if (typeof requestPerms !== 'function') {
+        Alert.alert('Error', 'Image picker is not available. Rebuild the app with: eas build --profile development --platform ios');
+        return;
+      }
+      const { status } = await requestPerms();
       if (status !== 'granted') {
         Alert.alert('Permission required', 'Camera roll access is needed to select an image');
         return;
       }
 
-      const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      const launchPicker = ImagePicker.launchImageLibraryAsync ?? (ImagePicker as any).default?.launchImageLibraryAsync;
+      if (typeof launchPicker !== 'function') {
+        Alert.alert('Error', 'Image picker is not available. Rebuild the app with: eas build --profile development --platform ios');
+        return;
+      }
+      const result = await launchPicker({
+        mediaTypes: 'images',
         allowsEditing: true,
         aspect: [1, 1],
-        quality: 0.8,
+        quality: 0.9,
+        base64: false,
       });
 
       if (!result.canceled && result.assets[0]) {
-        setAvatarUri(result.assets[0].uri);
+        const asset = result.assets[0];
+        setAvatarUri(asset.uri);
+        setAvatarMimeType(asset.mimeType ?? (asset.fileName?.toLowerCase().endsWith('.png') ? 'image/png' : 'image/jpeg'));
       }
-    } catch (error) {
+    } catch (error: any) {
       console.error('Image picker error:', error);
-      Alert.alert('Error', 'Failed to select image');
+      const msg = error?.message?.includes('ExponentImagePicker') || error?.message?.includes('native module')
+        ? 'Image picker requires a development build. Install the latest build from EAS.'
+        : 'Failed to select image';
+      Alert.alert('Error', msg);
     }
   };
 
@@ -90,19 +111,27 @@ export default function LoginScreen() {
         displayName: displayName,
       });
 
-      // 携帯・遅いネットで Firestore が「未認証」にならないよう、トークンを取得してから書き込む
       await user.getIdToken(true);
 
-      // Firestore への直書きは携帯ブラウザで CORS で失敗するため、Cloud Functions 経由で作成する
+      let avatarPath: string | undefined;
+      if (avatarUri) {
+        try {
+          const res = await uploadAvatarToStorage(user.uid, avatarUri, avatarMimeType);
+          avatarPath = res.avatarPath;
+        } catch (uploadErr: any) {
+          console.warn('[Login] Avatar upload failed:', uploadErr);
+        }
+      }
+
       const createUserDoc = httpsCallable<
-        { uid: string; displayName: string; country: string; avatarUrl?: string },
+        { uid: string; displayName: string; country: string; avatarPath?: string },
         { ok: boolean }
       >(functions, 'createUserDocument');
       await createUserDoc({
         uid: user.uid,
         displayName,
         country: selectedCountry,
-        ...(avatarUri ? { avatarUrl: avatarUri } : {}),
+        ...(avatarPath ? { avatarPath } : {}),
       });
 
       Alert.alert('Success', 'Account created. You can sign in with your email and password.');
@@ -141,7 +170,7 @@ export default function LoginScreen() {
   };
 
   return (
-    <View style={styles.container}>
+    <View style={[styles.container, { paddingTop: safeTop }]}>
       <Text style={styles.title}>Create account</Text>
       <Text style={styles.subtitle}>
         An account is required to play Ranked Match

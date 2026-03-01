@@ -1,4 +1,5 @@
 import { View, Text, StyleSheet, TextInput, TouchableOpacity, Alert, ActivityIndicator } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import { useState } from 'react';
 import { auth } from '../lib/firebase';
@@ -8,6 +9,8 @@ import { COLORS } from '../lib/theme';
 export default function ForgotPasswordScreen() {
   const router = useRouter();
   const params = useLocalSearchParams<{ email?: string }>();
+  const insets = useSafeAreaInsets();
+  const safeTop = 20 + insets.top;
   const [email, setEmail] = useState(params.email ?? '');
   const [loading, setLoading] = useState(false);
   const [sent, setSent] = useState(false);
@@ -36,7 +39,7 @@ export default function ForgotPasswordScreen() {
 
   if (sent) {
     return (
-      <View style={styles.container}>
+      <View style={[styles.container, { paddingTop: safeTop }]}>
         <Text style={styles.title}>Check your email</Text>
         <Text style={styles.subtitle}>
           We sent a password reset link to {email.trim()}. Open the link to set a new password.
@@ -49,7 +52,7 @@ export default function ForgotPasswordScreen() {
   }
 
   return (
-    <View style={styles.container}>
+    <View style={[styles.container, { paddingTop: safeTop }]}>
       <Text style={styles.title}>Reset password</Text>
       <Text style={styles.subtitle}>Enter your email and we'll send you a link to reset your password.</Text>
 

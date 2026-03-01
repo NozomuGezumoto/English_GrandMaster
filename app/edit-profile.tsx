@@ -1,17 +1,23 @@
 import { View, Text, StyleSheet, TextInput, TouchableOpacity, Alert, ActivityIndicator, Image, Platform, ScrollView } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { auth, db } from '../lib/firebase';
 import { updateProfile } from 'firebase/auth';
 import { doc, setDoc, getDoc, Timestamp } from 'firebase/firestore';
 import { User as FirestoreUser } from '../types/firestore';
 import { COUNTRIES } from '../lib/countries';
 import { COLORS } from '../lib/theme';
+import { uploadAvatarToStorage, getAvatarUrl } from '../lib/avatar-utils';
 
 export default function EditProfileScreen() {
   const router = useRouter();
+  const insets = useSafeAreaInsets();
+  const safeTop = 20 + insets.top;
   const [displayName, setDisplayName] = useState('');
-  const [avatarUri, setAvatarUri] = useState<string | null>(null);
+  const [avatarUri, setAvatarUri] = useState<string | null>(null); // 選択中・プレビュー用（ローカル or data URL）
+  const [avatarMimeType, setAvatarMimeType] = useState<string>('image/jpeg'); // 選択画像の MIME タイプ（アップロード用）
+  const [avatarDisplayUrl, setAvatarDisplayUrl] = useState<string | null>(null); // Storage から取得した表示用 URL
   const [selectedCountry, setSelectedCountry] = useState<string>('JP');
   const [showCountryPicker, setShowCountryPicker] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -32,8 +38,11 @@ export default function EditProfileScreen() {
         if (userDoc.exists()) {
           const userData = userDoc.data() as FirestoreUser;
           setDisplayName(userData.displayName || '');
-          setAvatarUri(userData.avatarUrl || null);
           setSelectedCountry(userData.country || 'JP');
+          if (userData.avatarPath || userData.avatarUrl) {
+            const url = await getAvatarUrl(userData);
+            if (url) setAvatarDisplayUrl(url);
+          }
         } else {
           // ユーザードキュメントが存在しない場合は、AuthのdisplayNameを使用
           setDisplayName(auth.currentUser.displayName || '');
@@ -62,7 +71,9 @@ export default function EditProfileScreen() {
           if (file) {
             const reader = new FileReader();
             reader.onload = (event: any) => {
-              setAvatarUri(event.target.result);
+              const dataUrl = event.target?.result as string;
+              setAvatarUri(dataUrl);
+              setAvatarDisplayUrl(null);
             };
             reader.readAsDataURL(file);
           }
@@ -71,27 +82,44 @@ export default function EditProfileScreen() {
         return;
       }
 
-      // モバイルではexpo-image-pickerを使用
+      // モバイルではexpo-image-pickerを使用（動的インポートでネイティブモジュール未対応時も画面は表示される）
       const ImagePicker = await import('expo-image-picker');
-      const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      const requestPerms = ImagePicker.requestMediaLibraryPermissionsAsync ?? (ImagePicker as any).default?.requestMediaLibraryPermissionsAsync;
+      if (typeof requestPerms !== 'function') {
+        Alert.alert('Error', 'Image picker is not available. Rebuild the app with: eas build --profile development --platform ios');
+        return;
+      }
+      const { status } = await requestPerms();
       if (status !== 'granted') {
         Alert.alert('Permission required', 'Media library access is needed to select an avatar image.');
         return;
       }
 
-      let result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      const launchPicker = ImagePicker.launchImageLibraryAsync ?? (ImagePicker as any).default?.launchImageLibraryAsync;
+      if (typeof launchPicker !== 'function') {
+        Alert.alert('Error', 'Image picker is not available. Rebuild the app with: eas build --profile development --platform ios');
+        return;
+      }
+      const result = await launchPicker({
+        mediaTypes: 'images',
         allowsEditing: true,
         aspect: [1, 1],
-        quality: 1,
+        quality: 0.9,
+        base64: false,
       });
 
-      if (!result.canceled) {
-        setAvatarUri(result.assets[0].uri);
+      if (!result.canceled && result.assets[0]) {
+        const asset = result.assets[0];
+        setAvatarUri(asset.uri);
+        setAvatarMimeType(asset.mimeType ?? (asset.fileName?.toLowerCase().endsWith('.png') ? 'image/png' : 'image/jpeg'));
+        setAvatarDisplayUrl(null);
       }
-    } catch (error) {
+    } catch (error: any) {
       console.error('Error picking image:', error);
-      Alert.alert('Error', 'Failed to select image.');
+      const msg = error?.message?.includes('ExponentImagePicker') || error?.message?.includes('native module')
+        ? 'Image picker requires a development build. Install the latest build from EAS.'
+        : 'Failed to select image.';
+      Alert.alert('Error', msg);
     }
   };
 
@@ -109,12 +137,10 @@ export default function EditProfileScreen() {
     try {
       setLoading(true);
       
-      // Authのプロフィールを更新
       await updateProfile(auth.currentUser, {
         displayName: displayName.trim(),
       });
 
-      // Firestoreにユーザードキュメントを更新（レート・勝敗はサーバー権威のため送らない）
       const userRef = doc(db, 'users', auth.currentUser.uid);
       const userData: Record<string, unknown> = {
         uid: auth.currentUser.uid,
@@ -122,12 +148,24 @@ export default function EditProfileScreen() {
         country: selectedCountry,
         lastActiveAt: Timestamp.now(),
       };
+
+      // 新規に画像を選択した場合のみ Storage へアップロード（avatarUri は選択時のみセットされる）
       if (avatarUri) {
-        userData.avatarUrl = avatarUri;
+        try {
+          const { avatarPath } = await uploadAvatarToStorage(auth.currentUser.uid, avatarUri, avatarMimeType);
+          userData.avatarPath = avatarPath;
+          userData.avatarUpdatedAt = Timestamp.now();
+          userData.avatarUrl = null;
+        } catch (uploadErr: any) {
+          console.error('[EditProfile] Avatar upload failed:', uploadErr);
+          Alert.alert('Error', 'Failed to upload avatar. ' + (uploadErr?.message || ''));
+          setLoading(false);
+          return;
+        }
       }
+
       await setDoc(userRef, userData, { merge: true });
 
-      // 保存完了したらプロフィールタブへ遷移（replace で履歴に編集画面を残さない）
       router.replace('/(tabs)/profile');
     } catch (error: any) {
       console.error('Update profile error:', error);
@@ -149,7 +187,7 @@ export default function EditProfileScreen() {
   const currentCountryName = COUNTRIES.find(c => c.code === selectedCountry)?.name || selectedCountry;
 
   return (
-    <View style={styles.container}>
+    <View style={[styles.container, { paddingTop: safeTop }]}>
       <View style={styles.header}>
         <TouchableOpacity onPress={() => router.back()}>
           <Text style={styles.cancelButton}>Cancel</Text>
@@ -163,8 +201,8 @@ export default function EditProfileScreen() {
         <View style={styles.avatarSection}>
           <Text style={styles.label}>Avatar (optional)</Text>
           <TouchableOpacity style={styles.avatarButton} onPress={pickImage}>
-            {avatarUri ? (
-              <Image source={{ uri: avatarUri }} style={styles.avatarImage} />
+            {(avatarUri || avatarDisplayUrl) ? (
+              <Image source={{ uri: avatarUri || avatarDisplayUrl || '' }} style={styles.avatarImage} />
             ) : (
               <View style={styles.avatarPlaceholder}>
                 <Text style={styles.avatarPlaceholderText}>Select image</Text>

@@ -1,7 +1,8 @@
 import { View, Text, StyleSheet, TouchableOpacity, Pressable, Alert, TextInput, ScrollView } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter, useFocusEffect } from 'expo-router';
 import { useState, useEffect, useCallback } from 'react';
-import { auth, functions, httpsCallable, db } from '../../lib/firebase';
+import { auth, functions, httpsCallable, callFunctionWithAuth, db } from '../../lib/firebase';
 import { getRandomQuestionIdsForToeic } from '../../lib/study-questions';
 import { getRandomListeningQuestionIds } from '../../lib/listening-response-questions';
 import { signInAnonymously, signOut, onAuthStateChanged } from 'firebase/auth';
@@ -14,6 +15,8 @@ import { preloadBattleSound, clearBattleSoundCache } from '../../lib/battle-soun
 
 export default function BattleScreen() {
   const router = useRouter();
+  const insets = useSafeAreaInsets();
+  const safeTop = 24 + insets.top;
   const [loading, setLoading] = useState(false);
   const [roomCode, setRoomCode] = useState('');
   const [showRoomInput, setShowRoomInput] = useState(false);
@@ -80,7 +83,7 @@ export default function BattleScreen() {
     }, [])
   );
 
-  // 匿名ログイン（簡易版）
+  // 匿名ログイン（簡易版）。トークン取得まで待つ（unauthenticated 防止）
   const ensureAuth = async () => {
     if (!auth.currentUser) {
       console.log('[ensureAuth] Signing in anonymously...');
@@ -93,6 +96,12 @@ export default function BattleScreen() {
       }
     } else {
       console.log('[ensureAuth] Already signed in:', auth.currentUser.uid);
+    }
+    // トークンが Functions に渡るよう確実に取得してから次へ進む（本番 401 回避）
+    if (auth.currentUser) {
+      await auth.currentUser.getIdToken(true);
+      // 匿名ログイン直後はサーバー側でトークンが有効になるまで少し遅れることがある
+      await new Promise((r) => setTimeout(r, 300));
     }
   };
 
@@ -111,7 +120,6 @@ export default function BattleScreen() {
       await ensureAuth();
       const questionCount = questionType === 'dictation' ? 5 : 10;
 
-      const createMatch = httpsCallable(functions, 'createMatch');
       const payload: Record<string, unknown> = {
         mode: 'ai',
         lang: 'en',
@@ -127,10 +135,11 @@ export default function BattleScreen() {
         const listeningIds = getRandomListeningQuestionIds(level, questionCount);
         if (listeningIds.length === questionCount) payload.questionIds = listeningIds;
       }
-      const result = await createMatch(payload);
+      // トークン明示で呼ぶ（httpsCallable で unauthenticated になる場合の回避）
+      const result = await callFunctionWithAuth<{ matchId?: string; roomCode?: string }>('createMatch', payload);
       
-      console.log('createMatch結果:', result.data);
-      const { matchId } = result.data as { matchId?: string };
+      console.log('createMatch結果:', result);
+      const { matchId } = result;
       if (!matchId) {
         Alert.alert('Error', 'Could not create match. Please try again.');
         return;
@@ -346,9 +355,9 @@ export default function BattleScreen() {
   };
 
   return (
-    <View style={styles.container}>
-      {/* ログイン状態表示 */}
-      <View style={styles.authContainer}>
+    <View style={[styles.container, { paddingTop: safeTop }]}>
+      {/* ログイン状態表示（安全領域内に配置して上部切れ防止） */}
+      <View style={[styles.authContainer, { top: insets.top + 12 }]}>
         {isLoggedIn ? (
           <View style={styles.userInfo}>
             <TouchableOpacity
@@ -376,7 +385,7 @@ export default function BattleScreen() {
 
       {/* ユーザー情報表示 */}
       {showUserInfo && userData && (
-        <View style={styles.userInfoModal}>
+        <View style={[styles.userInfoModal, { top: safeTop + 40 }]}>
           <ScrollView style={styles.userInfoContent}>
             <Text style={styles.userInfoTitle}>Account</Text>
             <View style={styles.userInfoRow}>
@@ -759,7 +768,6 @@ const styles = StyleSheet.create({
   },
   authContainer: {
     position: 'absolute',
-    top: 20,
     right: 20,
     zIndex: 10,
   },
@@ -868,7 +876,6 @@ const styles = StyleSheet.create({
   },
   userInfoModal: {
     position: 'absolute',
-    top: 80,
     right: 20,
     left: 20,
     backgroundColor: COLORS.surface,

@@ -5,6 +5,7 @@
 import { Platform } from 'react-native';
 import { Asset } from 'expo-asset';
 import { ensureAudioModeForSpeech } from './audio-mode';
+import { syncWebAudioToDefaultOutput } from './web-audio-utils';
 
 let cachedSound: { setPositionAsync: (n: number) => Promise<void>; playAsync: () => Promise<void> } | null = null;
 
@@ -64,7 +65,7 @@ export function playClickSound(): void {
     const a = getWebClickAudio();
     if (a) {
       a.currentTime = 0;
-      a.play().catch(() => {});
+      syncWebAudioToDefaultOutput(a).then(() => a.play().catch(() => {}));
     }
     return;
   }

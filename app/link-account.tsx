@@ -1,4 +1,5 @@
 import { View, Text, StyleSheet, TextInput, TouchableOpacity, Alert, ActivityIndicator } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { useState } from 'react';
 import { auth } from '../lib/firebase';
@@ -7,6 +8,8 @@ import { COLORS } from '../lib/theme';
 
 export default function LinkAccountScreen() {
   const router = useRouter();
+  const insets = useSafeAreaInsets();
+  const safeTop = 20 + insets.top;
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
@@ -14,7 +17,7 @@ export default function LinkAccountScreen() {
   const user = auth.currentUser;
   if (!user?.isAnonymous) {
     return (
-      <View style={styles.container}>
+      <View style={[styles.container, { paddingTop: safeTop }]}>
         <Text style={styles.subtitle}>Your account is already secured with email.</Text>
         <TouchableOpacity style={[styles.button, styles.primaryButton]} onPress={() => router.back()}>
           <Text style={styles.buttonText}>Back</Text>
@@ -53,7 +56,7 @@ export default function LinkAccountScreen() {
   };
 
   return (
-    <View style={styles.container}>
+    <View style={[styles.container, { paddingTop: safeTop }]}>
       <Text style={styles.title}>Secure your account</Text>
       <Text style={styles.subtitle}>
         Add an email and password to this account. You can then sign in on another device and keep your rank and stats.

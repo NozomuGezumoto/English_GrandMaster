@@ -1,4 +1,5 @@
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity, ActivityIndicator, TextInput, Alert } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useEffect, useState, useRef, type ReactElement } from 'react';
 import { collection, query, where, getDocs, orderBy, limit, doc, getDoc } from 'firebase/firestore';
 import { db, auth, functions, httpsCallable } from '../../lib/firebase';
@@ -30,6 +31,8 @@ type ListeningSubTab = 'list' | 'quiz' | 'wrong'; // 問題一覧（音声文の
 const LIST_QUESTIONS_LIMIT_PER_LEVEL = 500;
 
 export default function StudyScreen() {
+  const insets = useSafeAreaInsets();
+  const safeTop = Math.max(4, insets.top - 8);
   const [activeTab, setActiveTab] = useState<StudyTab>('choice');
   const [choiceSubTab, setChoiceSubTab] = useState<ChoiceSubTab>('list');
   const [listLevel, setListLevel] = useState<ToeicLevel>(400);
@@ -220,7 +223,7 @@ export default function StudyScreen() {
   const matchGroups = Object.values(questionsByMatch);
 
   return (
-    <View style={styles.container}>
+    <View style={[styles.container, { paddingTop: safeTop }]}>
       {/* タブ: 4択・復習 / ディクテーション */}
       <View style={styles.tabContainer}>
         <TouchableOpacity
@@ -592,7 +595,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     borderBottomWidth: 1,
     borderBottomColor: COLORS.border,
-    paddingHorizontal: 12,
+    paddingHorizontal: 32,
     marginTop: 8,
   },
   subTab: {
@@ -615,7 +618,7 @@ const styles = StyleSheet.create({
     fontSize: 14,
   },
   questionListSection: {
-    paddingHorizontal: 20,
+    paddingHorizontal: 32,
     paddingTop: 12,
     paddingBottom: 24,
   },
@@ -732,7 +735,7 @@ const styles = StyleSheet.create({
     marginTop: 8,
   },
   header: {
-    padding: 20,
+    padding: 32,
     borderBottomWidth: 1,
     borderBottomColor: COLORS.border,
   },
@@ -748,7 +751,7 @@ const styles = StyleSheet.create({
   },
   matchGroup: {
     marginTop: 24,
-    paddingHorizontal: 20,
+    paddingHorizontal: 32,
   },
   matchHeader: {
     marginBottom: 16,
@@ -1274,29 +1277,55 @@ function DictationScreen() {
             Listen and type the word you hear
           </Text>
           <Text style={dictationStyles.levelLabel}>Select difficulty (TOEIC · CEFR)</Text>
-          <View style={dictationStyles.levelRow}>
-            {TOEIC_LEVELS.map((lv) => {
-              const { cefr, label } = LEVEL_DISPLAY[lv];
-              const isSelected = selectedLevel === lv;
-              return (
-                <TouchableOpacity
-                  key={lv}
-                  style={[dictationStyles.levelCard, isSelected && dictationStyles.levelCardSelected]}
-                  onPress={() => setSelectedLevel(lv)}
-                  activeOpacity={0.8}
-                >
-                  <View style={[dictationStyles.levelCardBadge, isSelected && dictationStyles.levelCardBadgeSelected]}>
-                    <Text style={[dictationStyles.levelCardCefr, isSelected && dictationStyles.levelCardCefrSelected]}>{cefr}</Text>
-                  </View>
-                  <Text style={[dictationStyles.levelCardLabel, isSelected && dictationStyles.levelCardLabelSelected]} numberOfLines={2}>
-                    {label}
-                  </Text>
-                  <Text style={[dictationStyles.levelCardToeic, isSelected && dictationStyles.levelCardToeicSelected]}>
-                    TOEIC {lv}
-                  </Text>
-                </TouchableOpacity>
-              );
-            })}
+          <View style={dictationStyles.levelGrid}>
+            <View style={dictationStyles.levelRow}>
+              {TOEIC_LEVELS.slice(0, 3).map((lv) => {
+                const { cefr, label } = LEVEL_DISPLAY[lv];
+                const isSelected = selectedLevel === lv;
+                return (
+                  <TouchableOpacity
+                    key={lv}
+                    style={[dictationStyles.levelCard, isSelected && dictationStyles.levelCardSelected]}
+                    onPress={() => setSelectedLevel(lv)}
+                    activeOpacity={0.8}
+                  >
+                    <View style={[dictationStyles.levelCardBadge, isSelected && dictationStyles.levelCardBadgeSelected]}>
+                      <Text style={[dictationStyles.levelCardCefr, isSelected && dictationStyles.levelCardCefrSelected]}>{cefr}</Text>
+                    </View>
+                    <Text style={[dictationStyles.levelCardLabel, isSelected && dictationStyles.levelCardLabelSelected]} numberOfLines={2}>
+                      {label}
+                    </Text>
+                    <Text style={[dictationStyles.levelCardToeic, isSelected && dictationStyles.levelCardToeicSelected]}>
+                      TOEIC {lv}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+            <View style={[dictationStyles.levelRow, dictationStyles.levelRowSecond]}>
+              {TOEIC_LEVELS.slice(3, 5).map((lv) => {
+                const { cefr, label } = LEVEL_DISPLAY[lv];
+                const isSelected = selectedLevel === lv;
+                return (
+                  <TouchableOpacity
+                    key={lv}
+                    style={[dictationStyles.levelCard, isSelected && dictationStyles.levelCardSelected]}
+                    onPress={() => setSelectedLevel(lv)}
+                    activeOpacity={0.8}
+                  >
+                    <View style={[dictationStyles.levelCardBadge, isSelected && dictationStyles.levelCardBadgeSelected]}>
+                      <Text style={[dictationStyles.levelCardCefr, isSelected && dictationStyles.levelCardCefrSelected]}>{cefr}</Text>
+                    </View>
+                    <Text style={[dictationStyles.levelCardLabel, isSelected && dictationStyles.levelCardLabelSelected]} numberOfLines={2}>
+                      {label}
+                    </Text>
+                    <Text style={[dictationStyles.levelCardToeic, isSelected && dictationStyles.levelCardToeicSelected]}>
+                      TOEIC {lv}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
           </View>
           <View style={dictationStyles.buttonRow}>
             <TouchableOpacity
@@ -1324,7 +1353,7 @@ function DictationScreen() {
           </View>
 
           {wrongDictationList.length > 0 && (
-            <View style={{ marginTop: 24, paddingHorizontal: 20 }}>
+            <View style={{ marginTop: 24, paddingHorizontal: 32 }}>
               <Text style={dictationStyles.wordListTitle}>Wrong words (Dictation)</Text>
               <Text style={styles.sectionSubtitle}>{wrongDictationList.length} items</Text>
               <ScrollView style={{ maxHeight: 180 }} nestedScrollEnabled>
@@ -1470,39 +1499,47 @@ const dictationStyles = StyleSheet.create({
     flexGrow: 1,
     justifyContent: 'flex-start',
     alignItems: 'center',
-    padding: 1,
+    paddingHorizontal: 32,
     paddingBottom: 10,
   },
   title: {
     fontSize: 30,
     fontWeight: '800',
-    marginBottom: 16,
+    marginBottom: 12,
     color: COLORS.gold,
   },
   subtitle: {
     fontSize: 14,
     color: COLORS.muted,
     textAlign: 'center',
-    marginBottom: 24,
+    marginBottom: 12,
     lineHeight: 22,
   },
   levelLabel: {
     fontSize: 12,
     color: COLORS.muted,
-    marginBottom: 12,
+    marginBottom: 10,
     textAlign: 'center',
+  },
+  levelGrid: {
+    width: '100%',
+    marginBottom: 16,
+    paddingHorizontal: 12,
   },
   levelRow: {
     flexDirection: 'row',
-    flexWrap: 'wrap',
     justifyContent: 'center',
     gap: 10,
-    marginBottom: 28,
+    marginBottom: 10,
+  },
+  levelRowSecond: {
+    marginBottom: 0,
+    justifyContent: 'center',
+    gap: 10,
   },
   levelCard: {
-    width: '30%',
-    minWidth: 96,
-    maxWidth: 128,
+    width: '31%',
+    maxWidth: 120,
     paddingVertical: 10,
     paddingHorizontal: 6,
     borderRadius: 12,
@@ -1558,7 +1595,8 @@ const dictationStyles = StyleSheet.create({
     justifyContent: 'center',
     gap: 12,
     width: '100%',
-    marginTop: 8,
+    marginTop: 4,
+    paddingHorizontal: 12,
   },
   startButton: {
     backgroundColor: COLORS.primary,

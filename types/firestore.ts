@@ -177,6 +177,9 @@ export interface User {
   uid: string;
   displayName: string;
   avatarUrl?: string;
+  /** Storage パス（他端末表示用）。avatarPath があれば getDownloadURL で表示。avatarUrl は後方互換 */
+  avatarPath?: string;
+  avatarUpdatedAt?: Timestamp;
   country?: string;
   /** 総合ランク用レート（Grandmaster はこのみ）。後方互換で rating も overall として扱う */
   rating: number; // Eloレート（デフォルト: 1000）

@@ -1,7 +1,12 @@
 import { View, Text, StyleSheet, TouchableOpacity, Image, ActivityIndicator, ScrollView, Clipboard, TextInput, Alert, useWindowDimensions, Platform } from 'react-native';
+
+const PROFILE_COMPACT = true; // 必要な情報を1画面に収めるコンパクト表示
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter, useFocusEffect } from 'expo-router';
 import { useState, useCallback } from 'react';
 import { auth, db, functions, httpsCallable } from '../../lib/firebase';
+import { getAvatarUrl } from '../../lib/avatar-utils';
+import { AvatarImage } from '../components/AvatarImage';
 import { doc, getDoc, getDocFromServer, collection, query, where, getDocs } from 'firebase/firestore';
 import { User as FirestoreUser, TierType, UserStatsToday, FriendRequest } from '../../types/firestore';
 import type { UserRank } from '../../types/firestore';
@@ -27,6 +32,7 @@ type LookupResult =
       uid: string;
       displayName: string;
       avatarUrl?: string;
+      avatarPath?: string;
       rating: number;
       rank?: UserRank;
       titles?: FirestoreUser['titles'];
@@ -85,6 +91,8 @@ function getFriendCodeErrorMessage(e: unknown): string {
 
 export default function ProfileScreen() {
   const router = useRouter();
+  const insets = useSafeAreaInsets();
+  const safeTop = 20 + insets.top;
   const { width: windowWidth } = useWindowDimensions();
   const isWide = windowWidth >= 440; // 携帯はコンパクト、PC・タブレットはやや余裕を持たせる
   const r = {
@@ -113,6 +121,7 @@ export default function ProfileScreen() {
   const [pendingRequests, setPendingRequests] = useState<PendingRequestItem[]>([]);
   const [pendingRequestsLoading, setPendingRequestsLoading] = useState(false);
   const [respondingToUid, setRespondingToUid] = useState<string | null>(null);
+  const [avatarDisplayUrl, setAvatarDisplayUrl] = useState<string | null>(null);
 
   const loadPendingRequests = useCallback(async () => {
     const uid = auth.currentUser?.uid;
@@ -134,10 +143,11 @@ export default function ProfileScreen() {
           const data = d.data() as FriendRequest;
           const fromUser = await fetchUserData(data.fromUid);
           if (fromUser) {
+            const resolvedUrl = await getAvatarUrl(fromUser);
             items.push({
               fromUid: data.fromUid,
               displayName: fromUser.displayName ?? 'Unknown',
-              avatarUrl: fromUser.avatarUrl,
+              avatarUrl: resolvedUrl ?? undefined,
               rating: fromUser.rating ?? 1000,
             });
           }
@@ -178,10 +188,11 @@ export default function ProfileScreen() {
       uids.map(async (uid) => {
         const u = await fetchUserData(uid);
         if (u) {
+          const resolvedUrl = await getAvatarUrl(u);
           list.push({
             uid,
             displayName: u.displayName ?? 'Unknown',
-            avatarUrl: u.avatarUrl,
+            avatarUrl: resolvedUrl ?? undefined,
             rating: u.rating ?? 1000,
             rank: u.rank,
             titles: u.titles,
@@ -200,6 +211,7 @@ export default function ProfileScreen() {
       const user = auth.currentUser;
       if (!user?.uid) {
         setUserData(null);
+        setAvatarDisplayUrl(null);
         setFriendCode(null);
         setFriendCodeError(null);
         setFriendsList([]);
@@ -207,14 +219,40 @@ export default function ProfileScreen() {
         return;
       }
       setLoading(true);
-      fetchUserData(user.uid)
-        .then(async (data) => {
+      (async () => {
+        try {
+          let data = await fetchUserData(user.uid);
+          // ドキュメントが無い場合、createUserDocument で自動作成（対戦しなくても Profile 表示できるようにする）
+          if (!data && user.displayName) {
+            try {
+              const createUserDoc = httpsCallable<
+                { uid: string; displayName: string; country: string; avatarUrl?: string },
+                { ok: boolean }
+              >(functions, 'createUserDocument');
+              await createUserDoc({
+                uid: user.uid,
+                displayName: user.displayName,
+                country: 'JP',
+              });
+              data = await fetchUserData(user.uid);
+            } catch (e) {
+              console.error('[Profile] createUserDocument:', e);
+            }
+          }
           setUserData(data);
-          if (data) await loadFriendCodeAndList(data);
+          if (data) {
+            loadFriendCodeAndList(data);
+            getAvatarUrl(data).then(setAvatarDisplayUrl);
+          } else {
+            setAvatarDisplayUrl(null);
+          }
           loadPendingRequests();
-        })
-        .catch((err) => console.error('Error fetching user data:', err))
-        .finally(() => setLoading(false));
+        } catch (err) {
+          console.error('Error fetching user data:', err);
+        } finally {
+          setLoading(false);
+        }
+      })();
     }, [loadFriendCodeAndList, loadPendingRequests])
   );
 
@@ -416,11 +454,18 @@ export default function ProfileScreen() {
   const statsToday: UserStatsToday | null = userData.statsToday?.date === todayUtc ? userData.statsToday : null;
 
   return (
-    <ScrollView style={styles.container}>
-      <View style={[styles.content, { padding: r.contentPadding }]}>
+    <ScrollView
+      style={styles.container}
+      contentContainerStyle={[
+        { paddingTop: safeTop, paddingBottom: 24 },
+        PROFILE_COMPACT && styles.profileCompactScroll,
+      ]}
+      showsVerticalScrollIndicator={!PROFILE_COMPACT}
+    >
+      <View style={[styles.content, { padding: r.contentPadding }, PROFILE_COMPACT && styles.profileCompactContent]}>
         {/* ヘッダー */}
-        <View style={styles.header}>
-          <Text style={styles.title}>Profile</Text>
+        <View style={[styles.header, PROFILE_COMPACT && styles.headerCompact]}>
+          <Text style={[styles.title, PROFILE_COMPACT && styles.titleCompact]}>Profile</Text>
           <TouchableOpacity
             style={styles.editButton}
             onPress={() => router.push('/edit-profile')}
@@ -431,7 +476,7 @@ export default function ProfileScreen() {
 
         {/* 匿名アカウント: メール連携で保護 */}
         {auth.currentUser?.isAnonymous && (
-          <TouchableOpacity style={styles.secureBanner} onPress={() => router.push('/link-account')}>
+          <TouchableOpacity style={[styles.secureBanner, PROFILE_COMPACT && styles.secureBannerCompact]} onPress={() => router.push('/link-account')}>
             <Text style={styles.secureBannerTitle}>Secure your account</Text>
             <Text style={styles.secureBannerSubtext}>Add email & password to sign in on other devices and keep your rank.</Text>
             <Text style={styles.secureBannerLink}>Add email & password →</Text>
@@ -439,31 +484,31 @@ export default function ProfileScreen() {
         )}
 
         {/* アバターと基本情報 */}
-        <View style={styles.profileSection}>
-          {userData.avatarUrl ? (
-            <Image source={{ uri: userData.avatarUrl }} style={styles.avatar} />
+        <View style={[styles.profileSection, PROFILE_COMPACT && styles.profileSectionCompact]}>
+          {(avatarDisplayUrl || userData.avatarUrl) ? (
+            <Image source={{ uri: avatarDisplayUrl || userData.avatarUrl || '' }} style={[styles.avatar, PROFILE_COMPACT && styles.avatarCompact]} />
           ) : (
-            <View style={styles.avatarPlaceholder}>
-              <Text style={styles.avatarPlaceholderText}>
+            <View style={[styles.avatarPlaceholder, PROFILE_COMPACT && styles.avatarPlaceholderCompact]}>
+              <Text style={[styles.avatarPlaceholderText, PROFILE_COMPACT && styles.avatarPlaceholderTextCompact]}>
                 {userData.displayName.charAt(0).toUpperCase()}
               </Text>
             </View>
           )}
-          <Text style={styles.displayName}>{userData.displayName}</Text>
+          <Text style={[styles.displayName, PROFILE_COMPACT && styles.displayNameCompact]}>{userData.displayName}</Text>
           {userData.country && (
             <Text style={styles.country}>Country: {userData.country}</Text>
           )}
 
           {/* ランク・称号: 総合（Overall）のみ Grandmaster 称号。rankOverall ?? rank */}
-          <View style={styles.rankSection}>
+          <View style={[styles.rankSection, PROFILE_COMPACT && styles.rankSectionCompact]}>
             {(userData.rankOverall ?? userData.rank) ? (
               <>
                 <Text style={styles.rankModeLabel}>Overall — 総合</Text>
                 <View style={styles.rankRow}>
-                  <Text style={styles.tierPiece}>
+                  <Text style={[styles.tierPiece, PROFILE_COMPACT && styles.tierPieceCompact]}>
                     {TIER_INFO[(userData.rankOverall ?? userData.rank)!.tier]?.piece ?? '♙'}
                   </Text>
-                  <Text style={styles.tierLabel}>
+                  <Text style={[styles.tierLabel, PROFILE_COMPACT && styles.tierLabelCompact]}>
                     {TIER_INFO[(userData.rankOverall ?? userData.rank)!.tier]?.label ?? (userData.rankOverall ?? userData.rank)!.tier}
                   </Text>
                   {(userData.rankOverall ?? userData.rank)!.provisional && (
@@ -477,25 +522,25 @@ export default function ProfileScreen() {
               <Text style={styles.rankSub}>Rank not calculated yet</Text>
             )}
             {(userData.titles?.globalGM || userData.titles?.nationalGM) && (
-              <View style={styles.titlesContainer}>
+              <View style={[styles.titlesContainer, PROFILE_COMPACT && styles.titlesContainerCompact]}>
                 {userData.titles.globalGM && (
-                  <View style={[styles.titleBadge, styles.titleBadgeGlobal]}>
-                    <Text style={styles.titleBadgeIcon}>👑</Text>
-                    <Text style={styles.titleBadgeLabel}>World Top 10</Text>
-                    <Text style={styles.titleBadgeText}>World GrandMaster</Text>
+                  <View style={[styles.titleBadge, styles.titleBadgeGlobal, PROFILE_COMPACT && styles.titleBadgeCompact]}>
+                    <Text style={[styles.titleBadgeIcon, PROFILE_COMPACT && styles.titleBadgeIconCompact]}>👑</Text>
+                    <Text style={[styles.titleBadgeLabel, PROFILE_COMPACT && styles.titleBadgeLabelCompact]}>World Top 10</Text>
+                    <Text style={[styles.titleBadgeText, PROFILE_COMPACT && styles.titleBadgeTextCompact]}>World GrandMaster</Text>
                   </View>
                 )}
                 {userData.titles.nationalGM && (
-                  <View style={[styles.titleBadge, styles.titleBadgeNational]}>
-                    <Text style={styles.titleBadgeIcon}>🏆</Text>
-                    <Text style={styles.titleBadgeLabel}>National Top 0.1%</Text>
-                    <Text style={styles.titleBadgeText}>{getNationalGrandmasterLabel(userData.country)}</Text>
+                  <View style={[styles.titleBadge, styles.titleBadgeNational, PROFILE_COMPACT && styles.titleBadgeCompact]}>
+                    <Text style={[styles.titleBadgeIcon, PROFILE_COMPACT && styles.titleBadgeIconCompact]}>🏆</Text>
+                    <Text style={[styles.titleBadgeLabel, PROFILE_COMPACT && styles.titleBadgeLabelCompact]}>National Top 0.1%</Text>
+                    <Text style={[styles.titleBadgeText, PROFILE_COMPACT && styles.titleBadgeTextCompact]}>{getNationalGrandmasterLabel(userData.country)}</Text>
                   </View>
                 )}
               </View>
             )}
             {/* モード別ランク（称号なし） */}
-            <View style={styles.rankByModeSection}>
+            <View style={[styles.rankByModeSection, PROFILE_COMPACT && styles.rankByModeSectionCompact]}>
               <Text style={styles.rankByModeTitle}>By mode</Text>
               {[
                 { key: 'choice' as const, label: '4-Choice', rating: userData.ratingChoice ?? userData.rating ?? 1000, rank: userData.rankChoice },
@@ -503,7 +548,7 @@ export default function ProfileScreen() {
                 { key: 'listening' as const, label: 'Listening', rating: userData.ratingListening ?? 1000, rank: userData.rankListening },
                 { key: 'overall' as const, label: 'Overall', rating: userData.ratingOverall ?? userData.rating ?? 1000, rank: userData.rankOverall ?? userData.rank },
               ].map(({ label, rating, rank }) => (
-                <View key={label} style={styles.rankByModeRow}>
+                <View key={label} style={[styles.rankByModeRow, PROFILE_COMPACT && styles.rankByModeRowCompact]}>
                   <Text style={styles.rankByModeLabel}>{label}</Text>
                   <Text style={styles.rankByModeValue}>{rating}</Text>
                   {rank && (
@@ -518,10 +563,10 @@ export default function ProfileScreen() {
         </View>
 
         {/* 今日の学習 */}
-        <View style={styles.statsSection}>
-          <Text style={styles.sectionTitle}>Today&apos;s learning</Text>
-          <View style={styles.statsCard}>
-            <View style={styles.statsRow}>
+        <View style={[styles.statsSection, PROFILE_COMPACT && styles.statsSectionCompact]}>
+          <Text style={[styles.sectionTitle, PROFILE_COMPACT && styles.sectionTitleCompact]}>Today&apos;s learning</Text>
+          <View style={[styles.statsCard, PROFILE_COMPACT && styles.statsCardCompact]}>
+            <View style={[styles.statsRow, PROFILE_COMPACT && styles.statsRowCompact]}>
               <View style={styles.statsItem}>
                 <Text style={styles.statsItemLabel}>Battles</Text>
                 <Text style={styles.statsItemValue}>{statsToday?.battles ?? 0}</Text>
@@ -543,10 +588,10 @@ export default function ProfileScreen() {
         </View>
 
         {/* 戦績セクション */}
-        <View style={styles.statsSection}>
-          <Text style={styles.sectionTitle}>Stats</Text>
-          <View style={styles.statsCard}>
-            <View style={styles.statsRow}>
+        <View style={[styles.statsSection, PROFILE_COMPACT && styles.statsSectionCompact]}>
+          <Text style={[styles.sectionTitle, PROFILE_COMPACT && styles.sectionTitleCompact]}>Stats</Text>
+          <View style={[styles.statsCard, PROFILE_COMPACT && styles.statsCardCompact]}>
+            <View style={[styles.statsRow, PROFILE_COMPACT && styles.statsRowCompact]}>
               <View style={styles.statsItem}>
                 <Text style={styles.statsItemLabel}>Rating (Overall)</Text>
                 <View style={styles.ratingRow}>
@@ -570,7 +615,7 @@ export default function ProfileScreen() {
                 <Text style={styles.statsItemValue}>#{(userData.rankOverall ?? userData.rank)?.globalRank ?? '—'}</Text>
               </View>
             </View>
-            <View style={styles.statsRow}>
+            <View style={[styles.statsRow, PROFILE_COMPACT && styles.statsRowCompact]}>
               <View style={styles.statsItem}>
                 <Text style={styles.statsItemLabel}>Wins</Text>
                 <Text style={styles.statsItemValue}>{userData.wins}</Text>
@@ -594,9 +639,9 @@ export default function ProfileScreen() {
         </View>
 
         {/* フレンド */}
-        <View style={styles.statsSection}>
-          <Text style={styles.sectionTitle}>Friends</Text>
-          <View style={styles.statsCard}>
+        <View style={[styles.statsSection, PROFILE_COMPACT && styles.statsSectionCompact]}>
+          <Text style={[styles.sectionTitle, PROFILE_COMPACT && styles.sectionTitleCompact]}>Friends</Text>
+          <View style={[styles.statsCard, PROFILE_COMPACT && styles.statsCardCompact]}>
             <View style={styles.friendCodeRow}>
               <Text style={styles.friendCodeLabel}>Your friend code</Text>
               <View style={styles.friendCodeValueRow}>
@@ -672,13 +717,12 @@ export default function ProfileScreen() {
                 {addResult.found && !('isSelf' in addResult) && (
                   <>
                     <View style={styles.addResultRow}>
-                      {addResult.avatarUrl ? (
-                        <Image source={{ uri: addResult.avatarUrl }} style={[styles.addResultAvatar, { width: r.avatarSize, height: r.avatarSize, borderRadius: r.avatarSize / 2 }]} />
-                      ) : (
-                        <View style={[styles.friendAvatarPlaceholder, { width: r.avatarSize, height: r.avatarSize, borderRadius: r.avatarSize / 2 }]}>
-                          <Text style={[styles.friendAvatarLetter, { fontSize: r.nameSize }]}>{addResult.displayName.charAt(0).toUpperCase()}</Text>
-                        </View>
-                      )}
+                      <AvatarImage
+                        user={{ avatarPath: addResult.avatarPath, avatarUrl: addResult.avatarUrl }}
+                        displayName={addResult.displayName}
+                        size={r.avatarSize}
+                        style={styles.addResultAvatar}
+                      />
                       <View style={[styles.friendInfo, { marginLeft: r.infoMarginLeft }]}>
                         <Text style={[styles.friendName, { fontSize: r.nameSize }]}>{addResult.displayName}</Text>
                         <Text style={[styles.friendRating, { fontSize: r.subSize }]}>Rating: {addResult.rating}</Text>
@@ -798,6 +842,13 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: COLORS.background,
   },
+  profileCompactScroll: {
+    flexGrow: 1,
+    minHeight: '100%',
+  },
+  profileCompactContent: {
+    padding: 12,
+  },
   content: {
     padding: 20,
   },
@@ -857,6 +908,10 @@ const styles = StyleSheet.create({
     padding: 16,
     marginBottom: 24,
   },
+  secureBannerCompact: {
+    padding: 10,
+    marginBottom: 12,
+  },
   secureBannerTitle: {
     fontSize: 16,
     fontWeight: '700',
@@ -884,11 +939,17 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginBottom: 24,
   },
+  headerCompact: {
+    marginBottom: 8,
+  },
   title: {
     fontSize: 34,
     fontWeight: '800',
     color: COLORS.gold,
     letterSpacing: 0.5,
+  },
+  titleCompact: {
+    fontSize: 26,
   },
   editButton: {
     backgroundColor: COLORS.primary,
@@ -910,11 +971,21 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: COLORS.border,
   },
+  profileSectionCompact: {
+    marginBottom: 12,
+    paddingBottom: 12,
+  },
   avatar: {
     width: 100,
     height: 100,
     borderRadius: 50,
     marginBottom: 16,
+  },
+  avatarCompact: {
+    width: 64,
+    height: 64,
+    borderRadius: 32,
+    marginBottom: 8,
   },
   avatarPlaceholder: {
     width: 100,
@@ -927,16 +998,29 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: COLORS.border,
   },
+  avatarPlaceholderCompact: {
+    width: 64,
+    height: 64,
+    borderRadius: 32,
+    marginBottom: 8,
+  },
   avatarPlaceholderText: {
     color: COLORS.text,
     fontSize: 40,
     fontWeight: 'bold',
+  },
+  avatarPlaceholderTextCompact: {
+    fontSize: 28,
   },
   displayName: {
     fontSize: 28,
     fontWeight: 'bold',
     color: COLORS.text,
     marginBottom: 8,
+  },
+  displayNameCompact: {
+    fontSize: 20,
+    marginBottom: 4,
   },
   country: {
     fontSize: 13,
@@ -945,6 +1029,9 @@ const styles = StyleSheet.create({
   rankSection: {
     marginTop: 20,
     alignItems: 'center',
+  },
+  rankSectionCompact: {
+    marginTop: 10,
   },
   rankRow: {
     flexDirection: 'row',
@@ -956,10 +1043,16 @@ const styles = StyleSheet.create({
     fontSize: 32,
     color: COLORS.gold,
   },
+  tierPieceCompact: {
+    fontSize: 24,
+  },
   tierLabel: {
     fontSize: 20,
     fontWeight: '600',
     color: COLORS.text,
+  },
+  tierLabelCompact: {
+    fontSize: 16,
   },
   provisionalBadge: {
     backgroundColor: COLORS.muted,
@@ -989,6 +1082,10 @@ const styles = StyleSheet.create({
     borderTopWidth: 1,
     borderTopColor: COLORS.border,
   },
+  rankByModeSectionCompact: {
+    marginTop: 8,
+    paddingTop: 8,
+  },
   rankByModeTitle: {
     fontSize: 12,
     fontWeight: '600',
@@ -1000,6 +1097,9 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingVertical: 4,
+  },
+  rankByModeRowCompact: {
+    paddingVertical: 2,
   },
   rankByModeLabel: {
     fontSize: 13,
@@ -1019,6 +1119,10 @@ const styles = StyleSheet.create({
     marginTop: 16,
     gap: 12,
   },
+  titlesContainerCompact: {
+    marginTop: 8,
+    gap: 6,
+  },
   titleBadge: {
     paddingVertical: 16,
     paddingHorizontal: 24,
@@ -1026,6 +1130,11 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     borderWidth: 1,
+  },
+  titleBadgeCompact: {
+    paddingVertical: 8,
+    paddingHorizontal: 16,
+    borderRadius: 10,
   },
   titleBadgeGlobal: {
     backgroundColor: COLORS.primary,
@@ -1039,11 +1148,18 @@ const styles = StyleSheet.create({
     fontSize: 40,
     marginBottom: 8,
   },
+  titleBadgeIconCompact: {
+    fontSize: 24,
+    marginBottom: 4,
+  },
   titleBadgeLabel: {
     color: COLORS.muted,
     fontSize: 11,
     fontWeight: '600',
     marginBottom: 4,
+  },
+  titleBadgeLabelCompact: {
+    fontSize: 10,
   },
   titleBadgeText: {
     color: COLORS.text,
@@ -1051,8 +1167,14 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
     letterSpacing: 0.5,
   },
+  titleBadgeTextCompact: {
+    fontSize: 14,
+  },
   statsSection: {
     marginBottom: 24,
+  },
+  statsSectionCompact: {
+    marginBottom: 12,
   },
   sectionTitle: {
     fontSize: 24,
@@ -1061,12 +1183,20 @@ const styles = StyleSheet.create({
     marginBottom: 12,
     letterSpacing: 0.3,
   },
+  sectionTitleCompact: {
+    fontSize: 16,
+    marginBottom: 6,
+  },
   statsCard: {
     backgroundColor: COLORS.surface,
     borderRadius: 12,
     padding: 16,
     borderWidth: 1,
     borderColor: COLORS.border,
+  },
+  statsCardCompact: {
+    padding: 10,
+    borderRadius: 10,
   },
   statsRow: {
     flexDirection: 'row',
@@ -1075,6 +1205,9 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
     borderBottomWidth: 1,
     borderBottomColor: COLORS.border,
+  },
+  statsRowCompact: {
+    paddingVertical: 8,
   },
   statsRowLast: {
     borderBottomWidth: 0,
@@ -1095,6 +1228,9 @@ const styles = StyleSheet.create({
     fontSize: 26,
     fontWeight: '700',
     color: COLORS.gold,
+  },
+  statsItemValueCompact: {
+    fontSize: 18,
   },
   ratingRow: {
     flexDirection: 'row',

@@ -1,9 +1,11 @@
 import { View, Text, StyleSheet, TouchableOpacity, Alert, ActivityIndicator, TextInput, Image, ScrollView, Platform } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import { useEffect, useState, useRef, useCallback, type ReactElement } from 'react';
 import { doc, onSnapshot, getDoc } from 'firebase/firestore';
 import { onAuthStateChanged } from 'firebase/auth';
 import { db, auth, functions } from '../../lib/firebase';
+import { getAvatarUrl } from '../../lib/avatar-utils';
 import { httpsCallable } from 'firebase/functions';
 import { Match, Question, User as FirestoreUser, TierType } from '../../types/firestore';
 
@@ -52,6 +54,8 @@ function getEffectiveQuestionType(match: Match, qIndex: number): 'choice' | 'dic
 export default function MatchScreen() {
   const router = useRouter();
   const { id } = useLocalSearchParams<{ id: string }>();
+  const insets = useSafeAreaInsets();
+  const safeTop = 20 + insets.top;
   const [match, setMatch] = useState<Match | null>(null);
   const [currentQuestion, setCurrentQuestion] = useState<Question | null>(null);
   const [selectedChoice, setSelectedChoice] = useState<number | null>(null);
@@ -123,6 +127,8 @@ export default function MatchScreen() {
   const pendingFirstListeningLoadRef = useRef(false);
   /** ディクテーション1問目をカウント終了後にロードするため */
   const pendingFirstDictationLoadRef = useRef(false);
+  /** AI対戦：モバイルでリスニング/ディクテーション時に「音声を有効化」をタップしたか（effect 再実行用） */
+  const [aiSoundEnabledTrigger, setAiSoundEnabledTrigger] = useState(0);
 
   // GrandMaster: マッチが変わったらセグメント結果の dismiss 状態をリセット
   useEffect(() => {
@@ -306,11 +312,21 @@ export default function MatchScreen() {
     return new Promise<void>(async (resolve) => {
       try {
         await ensureAudioModeForSpeech();
+        if (__DEV__ && Platform.OS === 'web') {
+          const ss = typeof window !== 'undefined' ? (window as any).speechSynthesis : null;
+          console.log('[Audio] Web playDictationAudio:', { word, speaking: ss?.speaking, pending: ss?.pending });
+        }
+        let startFired = false;
         Speech.speak(word, {
           language: 'en-US',
+          onStart: () => {
+            startFired = true;
+            if (__DEV__ && Platform.OS === 'web') console.log('[Audio] Web: dictation speak started');
+          },
           onDone: () => {
             setIsPlayingAudio(false);
             resolve();
+            if (__DEV__ && Platform.OS === 'web') console.log('[Audio] Web: dictation speak done');
           },
           onError: (error) => {
             console.error('[Dictation] Speech error:', error);
@@ -318,6 +334,15 @@ export default function MatchScreen() {
             resolve();
           },
         });
+        if (__DEV__ && Platform.OS === 'web') {
+          setTimeout(() => {
+            if (!startFired) {
+              console.warn('[Audio] Web: dictation onStart never fired within 2s - likely blocked or Chrome speech bug');
+              setIsPlayingAudio(false);
+              resolve();
+            }
+          }, 2000);
+        }
       } catch (e) {
         setIsPlayingAudio(false);
         resolve();
@@ -333,10 +358,14 @@ export default function MatchScreen() {
     const loadUsers = async () => {
       try {
         const myDoc = await getDoc(doc(db, 'users', myUid));
-        setMyUser(myDoc.exists() ? { displayName: (myDoc.data() as FirestoreUser).displayName || 'You', avatarUrl: (myDoc.data() as FirestoreUser).avatarUrl } : { displayName: 'You' });
+        const myData = myDoc.exists() ? (myDoc.data() as FirestoreUser) : null;
+        const myAvatarUrl = myData ? await getAvatarUrl(myData) : null;
+        setMyUser(myData ? { displayName: myData.displayName || 'You', avatarUrl: myAvatarUrl ?? undefined } : { displayName: 'You' });
         if (oppUid && oppUid !== 'ai') {
           const oppDoc = await getDoc(doc(db, 'users', oppUid));
-          setOpponentUser(oppDoc.exists() ? { displayName: (oppDoc.data() as FirestoreUser).displayName || 'Opponent', avatarUrl: (oppDoc.data() as FirestoreUser).avatarUrl } : { displayName: 'Opponent' });
+          const oppData = oppDoc.exists() ? (oppDoc.data() as FirestoreUser) : null;
+          const oppAvatarUrl = oppData ? await getAvatarUrl(oppData) : null;
+          setOpponentUser(oppData ? { displayName: oppData.displayName || 'Opponent', avatarUrl: oppAvatarUrl ?? undefined } : { displayName: 'Opponent' });
         } else {
           setOpponentUser(oppUid === 'ai' ? { displayName: 'AI' } : { displayName: 'Opponent' });
         }
@@ -461,13 +490,14 @@ export default function MatchScreen() {
         setLoading(false);
         if (!opponentDataFetchedRef.current) {
           opponentDataFetchedRef.current = true;
-          getDoc(doc(db, 'users', oppUid)).then((oppDoc) => {
+          getDoc(doc(db, 'users', oppUid)).then(async (oppDoc) => {
             if (oppDoc.exists()) {
               const d = oppDoc.data() as FirestoreUser;
+              const avatarUrl = await getAvatarUrl(d);
               const isGM = matchData.questionType === 'overall';
               setOpponentFoundData({
                 displayName: d.displayName || 'Opponent',
-                avatarUrl: d.avatarUrl,
+                avatarUrl: avatarUrl ?? undefined,
                 rating: isGM ? (d.ratingOverall ?? d.rating ?? 1000) : (typeof d.rating === 'number' ? d.rating : 1000),
                 tier: isGM ? (d.rankOverall?.tier ?? d.rank?.tier) : d.rank?.tier,
               });
@@ -647,7 +677,8 @@ export default function MatchScreen() {
 
       // 終了チェック
       if (matchData.status === 'finished') {
-        if (matchData.mode === 'ranked' && matchData.winnerUid === uid) {
+        const isWinner = matchData.winnerUid === uid;
+        if (isWinner && (matchData.mode === 'ranked' || matchData.mode === 'ai' || matchData.mode === 'friend')) {
           preloadWinSound(); // Preload so result screen can play on mobile
         }
         router.replace(`/result/${id}`);
@@ -695,8 +726,37 @@ export default function MatchScreen() {
       if (promptText) {
         lastAudioPlayedForQIndexRef.current = qIndex;
         Speech.stop();
+        if (__DEV__ && Platform.OS === 'web') {
+          const ss = typeof window !== 'undefined' ? (window as any).speechSynthesis : null;
+          console.log('[Audio] Web: attempting Speech.speak for listening', {
+            qIndex,
+            promptLength: promptText.length,
+            speechSynthesisSpeaking: ss?.speaking,
+            speechSynthesisPending: ss?.pending,
+          });
+        }
         ensureAudioModeForSpeech().then(() => {
-          Speech.speak(promptText, { language: 'en-US' });
+          let startFired = false;
+          Speech.speak(promptText, {
+            language: 'en-US',
+            onStart: () => {
+              startFired = true;
+              if (__DEV__ && Platform.OS === 'web') console.log('[Audio] Web: listening speak started');
+            },
+            onError: (e) => {
+              if (__DEV__ && Platform.OS === 'web') console.warn('[Audio] Web Speech.speak error:', e);
+            },
+            onDone: () => {
+              if (__DEV__ && Platform.OS === 'web') console.log('[Audio] Web: listening speak done');
+            },
+          });
+          if (__DEV__ && Platform.OS === 'web') {
+            setTimeout(() => {
+              if (!startFired) {
+                console.warn('[Audio] Web: onStart never fired within 2s - likely blocked (Chrome user-activation) or Chrome speech bug');
+              }
+            }, 2000);
+          }
         });
       }
       return;
@@ -705,12 +765,21 @@ export default function MatchScreen() {
       const correctWord = getCorrectWord(currentQuestion);
       if (correctWord) {
         lastAudioPlayedForQIndexRef.current = qIndex;
+        if (__DEV__ && Platform.OS === 'web') {
+          const ss = typeof window !== 'undefined' ? (window as any).speechSynthesis : null;
+          console.log('[Audio] Web: attempting Speech.speak for dictation', {
+            qIndex,
+            word: correctWord,
+            speechSynthesisSpeaking: ss?.speaking,
+            speechSynthesisPending: ss?.pending,
+          });
+        }
         playDictationAudio(correctWord).then(() => {
           setTimeout(() => dictationInputRef.current?.focus(), 500);
         });
       }
     }
-  }, [match?.status, match?.currentQuestionIndex, match?.gameStartsAt, match?.questionType, match?.choiceCount, match?.listeningCount, currentQuestion, dismissedPhaseResultAt, playDictationAudio, countdownTick]);
+  }, [match?.status, match?.currentQuestionIndex, match?.gameStartsAt, match?.questionType, match?.choiceCount, match?.listeningCount, currentQuestion, dismissedPhaseResultAt, playDictationAudio, countdownTick, aiSoundEnabledTrigger]);
 
   // ディクテーション用の回答処理
   const handleDictationSubmit = useCallback(async (textAnswer: string) => {
@@ -1097,7 +1166,7 @@ export default function MatchScreen() {
 
   if (!id) {
     return (
-      <View style={styles.container}>
+      <View style={[styles.container, { paddingTop: safeTop }]}>
         <Text style={styles.loadingText}>Invalid match</Text>
         <TouchableOpacity style={styles.nextButton} onPress={() => router.back()}>
           <Text style={styles.nextButtonText}>Back</Text>
@@ -1108,7 +1177,7 @@ export default function MatchScreen() {
 
   if (loading || !match) {
     return (
-      <View style={styles.container}>
+      <View style={[styles.container, { paddingTop: safeTop }]}>
         <ActivityIndicator size="large" color={COLORS.gold} />
         <Text style={styles.loadingText}>Loading...</Text>
       </View>
@@ -1122,7 +1191,7 @@ export default function MatchScreen() {
 
   if (match.status === 'waiting') {
     return (
-      <View style={styles.container}>
+      <View style={[styles.container, { paddingTop: safeTop }]}>
         {match.mode === 'ranked' ? (
           <>
             <Text style={styles.waitingText}>Ranked Match</Text>
@@ -1294,7 +1363,7 @@ export default function MatchScreen() {
     }
 
     return (
-      <View style={styles.container}>
+      <View style={[styles.container, { paddingTop: safeTop }]}>
         <View style={styles.opponentFoundCard}>
           <Text style={styles.opponentFoundTitle}>Match Found!</Text>
           <Text style={styles.opponentFoundSubtitle}>You will battle this opponent</Text>
@@ -1401,10 +1470,34 @@ export default function MatchScreen() {
 
   if (!currentQuestion) {
     return (
-      <View style={styles.container}>
+      <View style={[styles.container, { paddingTop: safeTop }]}>
         <Text style={styles.loadingText}>Loading question...</Text>
       </View>
     );
+  }
+
+  // AI対戦・モバイルのみ：リスニング/ディクテーション時は音声有効化が必要（相手画面がないため）。Webは自動再生のまま
+  if (match?.mode === 'ai' && Platform.OS !== 'web' && !audioAcknowledgedForMatchRef.current && match?.status === 'playing') {
+    const qIdx = match.currentQuestionIndex ?? 0;
+    const effType = getEffectiveQuestionType(match, qIdx);
+    if (effType === 'listening' || effType === 'dictation') {
+      return (
+        <TouchableOpacity
+          style={styles.countdownOverlay}
+          activeOpacity={1}
+          onPress={() => {
+            Speech.speak(PHASE_RESULT_UNLOCK_SPEECH, { language: 'en-US', rate: 1.0 });
+            audioAcknowledgedForMatchRef.current = true;
+            setAiSoundEnabledTrigger((t) => t + 1);
+          }}
+        >
+          <View style={styles.countdownCard}>
+            <Text style={styles.countdownLabel}>Enable sound</Text>
+            <Text style={styles.countdownNumber}>Tap to start</Text>
+          </View>
+        </TouchableOpacity>
+      );
+    }
   }
 
   const formatTime = (seconds: number) => {
@@ -1416,11 +1509,15 @@ export default function MatchScreen() {
   const correctChoiceIndex = match ? (correctChoiceByQIndex[match.currentQuestionIndex] ?? currentQuestion?.answerIndex) : undefined;
   // 正誤表示: (1) correctChoiceIndex と一致 (2) レスポンスで受け取った serverIsCorrect (3) Firestore の answers[uid][qIndex].isCorrect（サーバーが書き込んだ値・後から答えた端末でも確実）
   const serverWrittenIsCorrect = match && uid ? match.answers?.[uid]?.[match.currentQuestionIndex]?.isCorrect : undefined;
+  const qIdx = match?.currentQuestionIndex ?? -1;
+  const serverIsCorrectVal = serverIsCorrectByQIndex[qIdx];
   const isCorrect = answered && selectedChoice !== null && (
     (typeof correctChoiceIndex === 'number' && correctChoiceIndex === selectedChoice) ||
-    serverIsCorrectByQIndex[match?.currentQuestionIndex ?? -1] === true ||
+    serverIsCorrectVal === true ||
     serverWrittenIsCorrect === true
   );
+  // incorrect はサーバーが明示的に不正解と返したときのみ表示（応答待ちで誤って incorrect を出さない）
+  const hasDefinitiveWrong = serverWrittenIsCorrect === false || serverIsCorrectVal === false;
 
   // GrandMaster(overall): 4択→リスニング→ディクテーションの区切りでセグメント勝者を表示（先に勝者→Continue→3秒カウントダウン→次フェーズ）
   const choiceCount = match?.choiceCount ?? 10;
@@ -1550,7 +1647,7 @@ export default function MatchScreen() {
     const oppDisplayName = opponentUid === 'ai' ? 'AI' : (opponentUser?.displayName ?? 'Opponent');
 
     return (
-      <View style={styles.container}>
+      <View style={[styles.container, { paddingTop: safeTop }]}>
         {/* ヘッダー */}
         <View style={styles.header}>
           <Text style={styles.questionNumber}>
@@ -1672,7 +1769,7 @@ export default function MatchScreen() {
   const oppLife4 = match.lives?.[opponentUid] ?? 3;
 
   return (
-    <View style={styles.container}>
+    <View style={[styles.container, { paddingTop: safeTop }]}>
       {/* ヘッダー */}
       <View style={styles.header}>
         <Text style={styles.questionNumber}>
@@ -1747,7 +1844,7 @@ export default function MatchScreen() {
             (typeof correctChoiceIndex !== 'number' && serverIsCorrectByQIndex[match.currentQuestionIndex] === true && index === selectedChoice) ||
             (serverWrittenIsCorrect === true && index === selectedChoice)
           );
-          const showIncorrect = answered && isSelected && !isCorrect;
+          const showIncorrect = answered && isSelected && hasDefinitiveWrong;
 
           return (
             <TouchableOpacity
@@ -1783,7 +1880,7 @@ export default function MatchScreen() {
           <>
             <View style={styles.explanationContainer}>
               <Text style={styles.explanationLabel}>
-                {isCorrect ? '✓ Correct!' : '✗ Incorrect'}
+                {isCorrect ? '✓ Correct!' : hasDefinitiveWrong ? '✗ Incorrect' : '...'}
               </Text>
               <ScrollView style={styles.explanationScroll} nestedScrollEnabled showsVerticalScrollIndicator={false}>
                 <Text style={styles.explanation}>{currentQuestion.explanation ?? ''}</Text>

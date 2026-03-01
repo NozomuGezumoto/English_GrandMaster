@@ -1,4 +1,5 @@
 import { View, Text, StyleSheet, TextInput, TouchableOpacity, Alert, ActivityIndicator, Platform } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import { useState } from 'react';
 import Constants from 'expo-constants';
@@ -9,6 +10,8 @@ import { COLORS } from '../lib/theme';
 export default function SignInScreen() {
   const router = useRouter();
   const params = useLocalSearchParams<{ email?: string }>();
+  const insets = useSafeAreaInsets();
+  const safeTop = 20 + insets.top;
   const [email, setEmail] = useState(params.email ?? '');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
@@ -50,7 +53,7 @@ export default function SignInScreen() {
   };
 
   return (
-    <View style={styles.container}>
+    <View style={[styles.container, { paddingTop: safeTop }]}>
       <Text style={styles.title}>Sign in</Text>
       <Text style={styles.subtitle}>Sign in with your email to access your account</Text>
 

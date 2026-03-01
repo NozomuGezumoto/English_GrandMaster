@@ -5,6 +5,7 @@
 import { Platform } from 'react-native';
 import { Asset } from 'expo-asset';
 import { ensureAudioModeForSpeech } from './audio-mode';
+import { syncWebAudioToDefaultOutput } from './web-audio-utils';
 
 const PLAYBACK_RATE = 1.5;
 
@@ -65,7 +66,7 @@ export function playWinSound(): void {
     if (a) {
       a.currentTime = 0;
       a.playbackRate = PLAYBACK_RATE;
-      a.play().catch(() => {});
+      syncWebAudioToDefaultOutput(a).then(() => a.play().catch(() => {}));
     }
     return;
   }

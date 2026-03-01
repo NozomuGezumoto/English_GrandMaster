@@ -172,7 +172,7 @@ async function getRandomQuestions(
 
 // 1. マッチ作成
 export const createMatch = functions.https.onCall(
-  async (data: CreateMatchRequest, context) => {
+  async (data: CreateMatchRequest, context: functions.https.CallableContext) => {
     if (!context.auth) {
       throw new functions.https.HttpsError(
         'unauthenticated',
@@ -293,7 +293,6 @@ export const createMatch = functions.https.onCall(
       console.error('createMatch error:', error);
       console.error('Error stack:', error.stack);
       console.error('Error message:', error.message);
-      // エラーの種類に応じて適切なエラーを返す
       if (error instanceof functions.https.HttpsError) {
         throw error;
       }
@@ -307,7 +306,7 @@ export const createMatch = functions.https.onCall(
 
 // 2. 友達対戦に参加
 export const joinFriendMatch = functions.https.onCall(
-  async (data: JoinFriendMatchRequest, context) => {
+  async (data: JoinFriendMatchRequest, context: functions.https.CallableContext) => {
     if (!context.auth) {
       throw new functions.https.HttpsError(
         'unauthenticated',
@@ -395,7 +394,7 @@ const answerCooldown = () => new Promise<void>(r => setTimeout(r, ANSWER_COOLDOW
 
 // 3. 回答を提出
 export const submitAnswer = functions.https.onCall(
-  async (data: SubmitAnswerRequest, context) => {
+  async (data: SubmitAnswerRequest, context: functions.https.CallableContext) => {
     // 最初にログを出力（エラーが発生する前に）
     console.log('[submitAnswer] Function called');
     
@@ -941,7 +940,7 @@ interface GetQuestionForMatchRequest {
   questionId: string;
 }
 export const getQuestionForMatch = functions.https.onCall(
-  async (data: GetQuestionForMatchRequest, context) => {
+  async (data: GetQuestionForMatchRequest, context: functions.https.CallableContext) => {
     if (!context.auth) {
       throw new functions.https.HttpsError('unauthenticated', 'Authentication required');
     }
@@ -980,7 +979,7 @@ function getTodayUtcDateString(): string {
 
 /** マッチ終了時に「今日の学習」を記録（対戦回数・勝敗）。二重カウント防止のため match.todayStatsRecordedFor に uid を追加 */
 export const recordMatchComplete = functions.https.onCall(
-  async (data: { matchId: string }, context) => {
+  async (data: { matchId: string }, context: functions.https.CallableContext) => {
     if (!context.auth) {
       throw new functions.https.HttpsError('unauthenticated', 'Authentication required');
     }
@@ -1034,7 +1033,7 @@ export const recordMatchComplete = functions.https.onCall(
 
 /** ディクテーション 1 問正解ごとに「今日の学習」の dictationSolved を +1 */
 export const incrementTodayDictation = functions.https.onCall(
-  async (_data: unknown, context) => {
+  async (_data: unknown, context: functions.https.CallableContext) => {
     if (!context.auth) {
       throw new functions.https.HttpsError('unauthenticated', 'Authentication required');
     }
@@ -1062,7 +1061,7 @@ const FRIEND_CODE_LENGTH = 6;
 
 /** 携帯ブラウザなど CORS で Firestore 直書きが失敗する場合のため、サーバー側で users を作成する */
 export const createUserDocument = functions.https.onCall(
-  async (data: { uid: string; displayName: string; country: string; avatarUrl?: string }, context) => {
+  async (data: { uid: string; displayName: string; country: string; avatarUrl?: string; avatarPath?: string }, context: functions.https.CallableContext) => {
     if (!context.auth) {
       throw new functions.https.HttpsError('unauthenticated', 'Authentication required');
     }
@@ -1087,7 +1086,10 @@ export const createUserDocument = functions.https.onCall(
       losses: 0,
       lastActiveAt: now,
     };
-    if (data.avatarUrl) {
+    if (data.avatarPath) {
+      update.avatarPath = data.avatarPath;
+      update.avatarUpdatedAt = now;
+    } else if (data.avatarUrl) {
       update.avatarUrl = data.avatarUrl;
     }
     if (!userDoc.exists) {
@@ -1111,7 +1113,7 @@ function generateFriendCode(): string {
 
 /** 自分のフレンドコードを取得（未発行なら発行） */
 export const getOrCreateFriendCode = functions.https.onCall(
-  async (_data: unknown, context) => {
+  async (_data: unknown, context: functions.https.CallableContext) => {
     try {
       if (!context.auth) {
         throw new functions.https.HttpsError('unauthenticated', 'Authentication required');
@@ -1146,7 +1148,7 @@ export const getOrCreateFriendCode = functions.https.onCall(
 
 /** フレンドコードでユーザーを検索（表示用の公開情報のみ返す） */
 export const lookupByFriendCode = functions.https.onCall(
-  async (data: { code: string }, context) => {
+  async (data: { code: string }, context: functions.https.CallableContext) => {
     if (!context.auth) {
       throw new functions.https.HttpsError('unauthenticated', 'Authentication required');
     }
@@ -1172,6 +1174,7 @@ export const lookupByFriendCode = functions.https.onCall(
       uid: targetUid,
       displayName: u.displayName || 'Unknown',
       avatarUrl: u.avatarUrl,
+      avatarPath: u.avatarPath,
       rating: u.rating ?? 1000,
       rank: u.rank,
       titles: u.titles,
@@ -1201,7 +1204,7 @@ function addFriendMutual(
 
 /** フレンドリクエストを送信（相手の承認待ち） */
 export const sendFriendRequest = functions.https.onCall(
-  async (data: { toUid: string }, context) => {
+  async (data: { toUid: string }, context: functions.https.CallableContext) => {
     if (!context.auth) {
       throw new functions.https.HttpsError('unauthenticated', 'Authentication required');
     }
@@ -1249,7 +1252,7 @@ export const sendFriendRequest = functions.https.onCall(
 
 /** フレンドリクエストを承認（相互にフレンド追加） */
 export const approveFriendRequest = functions.https.onCall(
-  async (data: { fromUid: string }, context) => {
+  async (data: { fromUid: string }, context: functions.https.CallableContext) => {
     if (!context.auth) {
       throw new functions.https.HttpsError('unauthenticated', 'Authentication required');
     }
@@ -1286,7 +1289,7 @@ export const approveFriendRequest = functions.https.onCall(
 
 /** フレンドリクエストを拒否 */
 export const rejectFriendRequest = functions.https.onCall(
-  async (data: { fromUid: string }, context) => {
+  async (data: { fromUid: string }, context: functions.https.CallableContext) => {
     if (!context.auth) {
       throw new functions.https.HttpsError('unauthenticated', 'Authentication required');
     }
@@ -1312,7 +1315,7 @@ export const rejectFriendRequest = functions.https.onCall(
 
 /** フレンドを追加（相互に friends 配列に追加）— 後方互換のため残すがクライアントは sendFriendRequest を使用すること */
 export const addFriend = functions.https.onCall(
-  async (data: { friendUid: string }, context) => {
+  async (data: { friendUid: string }, context: functions.https.CallableContext) => {
     if (!context.auth) {
       throw new functions.https.HttpsError('unauthenticated', 'Authentication required');
     }
@@ -1345,7 +1348,7 @@ export const addFriend = functions.https.onCall(
 
 /** フレンドを削除（相互に friends 配列から削除） */
 export const removeFriend = functions.https.onCall(
-  async (data: { friendUid: string }, context) => {
+  async (data: { friendUid: string }, context: functions.https.CallableContext) => {
     if (!context.auth) {
       throw new functions.https.HttpsError('unauthenticated', 'Authentication required');
     }
@@ -1597,7 +1600,7 @@ async function finalizeMatchInternal(
 
 // 5. マッチを終了（外部呼び出し用）
 export const finalizeMatch = functions.https.onCall(
-  async (data: FinalizeMatchRequest, context) => {
+  async (data: FinalizeMatchRequest, context: functions.https.CallableContext) => {
     if (!context.auth) {
       throw new functions.https.HttpsError(
         'unauthenticated',
@@ -1650,7 +1653,7 @@ export const finalizeMatch = functions.https.onCall(
 
 // 5b. ランクマッチ不戦勝の申告（相手が回答期限+20秒応答なし）
 export const claimForfeit = functions.https.onCall(
-  async (data: ClaimForfeitRequest, context) => {
+  async (data: ClaimForfeitRequest, context: functions.https.CallableContext) => {
     if (!context.auth) {
       throw new functions.https.HttpsError(
         'unauthenticated',
@@ -1738,7 +1741,7 @@ export const claimForfeit = functions.https.onCall(
 
 // 6. ランクマッチを検索・作成
 export const findRankedMatch = functions.https.onCall(
-  async (data, context) => {
+  async (data, context: functions.https.CallableContext) => {
     if (!context.auth) {
       throw new functions.https.HttpsError(
         'unauthenticated',
@@ -1912,7 +1915,7 @@ export const findRankedMatch = functions.https.onCall(
 
 // 両者マッチ後、ゲーム開始前に「準備完了」を押したときに呼ぶ。両方 true になったら status を playing にし、開始時刻・ライフ等を設定
 export const setMatchReady = functions.https.onCall(
-  async (data, context) => {
+  async (data, context: functions.https.CallableContext) => {
     if (!context.auth) {
       throw new functions.https.HttpsError('unauthenticated', 'Authentication required');
     }
@@ -1988,7 +1991,7 @@ export const setMatchReady = functions.https.onCall(
 
 /** Begin Battle 押下時に呼ぶ。自分の beginBattle フラグを立て、両方 true になったら gameStartsAt 等を設定して 3 秒カウントダウン開始 */
 export const startGameCountdown = functions.https.onCall(
-  async (data, context) => {
+  async (data, context: functions.https.CallableContext) => {
     if (!context.auth) {
       throw new functions.https.HttpsError('unauthenticated', 'Authentication required');
     }
@@ -2066,7 +2069,7 @@ export const startGameCountdown = functions.https.onCall(
 
 /** セグメント勝敗画面で Continue を押したときに呼ぶ。両方押したら listeningPhaseStartsAt / dictationPhaseStartsAt を設定 */
 export const continuePhaseResult = functions.https.onCall(
-  async (data, context) => {
+  async (data, context: functions.https.CallableContext) => {
     if (!context.auth) {
       throw new functions.https.HttpsError('unauthenticated', 'Authentication required');
     }
@@ -2296,7 +2299,7 @@ async function recomputeRanksInternal(mode: RankedMode = 'overall'): Promise<{ u
 
 /** 手動（Callable）でランク再計算。mode 省略時は全4モードを再計算。 */
 export const recomputeRanks = functions.https.onCall(
-  async (data: { mode?: RankedMode }, context) => {
+  async (data: { mode?: RankedMode }, context: functions.https.CallableContext) => {
     const mode = data?.mode;
     if (mode) {
       const result = await recomputeRanksInternal(mode);

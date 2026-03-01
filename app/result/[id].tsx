@@ -1,8 +1,10 @@
 import { View, Text, StyleSheet, TouchableOpacity, ScrollView, Image, Platform } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import { useEffect, useState, useRef } from 'react';
 import { doc, getDoc } from 'firebase/firestore';
 import { db, auth, functions, httpsCallable } from '../../lib/firebase';
+import { getAvatarUrl } from '../../lib/avatar-utils';
 import { Match, Question, User as FirestoreUser } from '../../types/firestore';
 import { normalizeQuestion } from '../../lib/question-utils';
 import { getQuestionById, isLocalQuestionId } from '../../lib/study-questions';
@@ -13,6 +15,8 @@ import { playWinSound } from '../../lib/win-sound';
 export default function ResultScreen() {
   const router = useRouter();
   const { id } = useLocalSearchParams<{ id: string }>();
+  const insets = useSafeAreaInsets();
+  const safeTop = 20 + insets.top;
   const [match, setMatch] = useState<Match | null>(null);
   const [questions, setQuestions] = useState<Question[]>([]);
   const [loading, setLoading] = useState(true);
@@ -25,16 +29,18 @@ export default function ResultScreen() {
     winSoundPlayedRef.current = false;
   }, [id]);
 
-  // Play win sound once when ranked victory; hooks must run before any early return
+  // Play win sound once when victory (ranked / ai / friend), only after result screen is fully loaded (画面表示と同時)
   useEffect(() => {
-    if (!match || match.mode !== 'ranked') return;
+    if (loading || !match) return;
+    const isRankedOrAiOrFriend = match.mode === 'ranked' || match.mode === 'ai' || match.mode === 'friend';
+    if (!isRankedOrAiOrFriend) return;
     const uid = auth.currentUser?.uid;
     if (!uid) return;
     const isWinner = match.winnerUid === uid;
     if (!isWinner || winSoundPlayedRef.current) return;
     winSoundPlayedRef.current = true;
     playWinSound();
-  }, [match?.mode, match?.winnerUid]);
+  }, [loading, match?.mode, match?.winnerUid]);
 
   useEffect(() => {
     if (!id) {
@@ -70,10 +76,11 @@ export default function ResultScreen() {
         if (uid) {
           const myDoc = await getDoc(doc(db, 'users', uid));
           const myData = myDoc.exists() ? (myDoc.data() as FirestoreUser) : null;
+          const myAvatarUrl = myData ? await getAvatarUrl(myData) : null;
           setMyUser(myData
             ? {
                 displayName: myData.displayName || 'You',
-                avatarUrl: myData.avatarUrl,
+                avatarUrl: myAvatarUrl ?? undefined,
                 rating: myData.rating ?? myData.ratingOverall,
                 ratingChange: myData.ratingChange,
               }
@@ -81,7 +88,9 @@ export default function ResultScreen() {
         }
         if (oppUid && oppUid !== 'ai') {
           const oppDoc = await getDoc(doc(db, 'users', oppUid));
-          setOpponentUser(oppDoc.exists() ? { displayName: (oppDoc.data() as FirestoreUser).displayName || 'Opponent', avatarUrl: (oppDoc.data() as FirestoreUser).avatarUrl } : { displayName: 'Opponent' });
+          const oppData = oppDoc.exists() ? (oppDoc.data() as FirestoreUser) : null;
+          const oppAvatarUrl = oppData ? await getAvatarUrl(oppData) : null;
+          setOpponentUser(oppData ? { displayName: oppData.displayName || 'Opponent', avatarUrl: oppAvatarUrl ?? undefined } : { displayName: 'Opponent' });
         } else {
           setOpponentUser(oppUid === 'ai' ? { displayName: 'AI' } : { displayName: 'Opponent' });
         }
@@ -109,7 +118,7 @@ export default function ResultScreen() {
 
   if (!id) {
     return (
-      <View style={styles.container}>
+      <View style={[styles.container, { paddingTop: safeTop }]}>
         <Text style={styles.loadingText}>Invalid match</Text>
         <TouchableOpacity style={styles.homeButton} onPress={() => router.replace('/')}>
           <Text style={styles.homeButtonText}>Back to Home</Text>
@@ -120,7 +129,7 @@ export default function ResultScreen() {
 
   if (loading || !match) {
     return (
-      <View style={styles.container}>
+      <View style={[styles.container, { paddingTop: safeTop }]}>
         <Text style={styles.loadingText}>Loading...</Text>
       </View>
     );
@@ -159,7 +168,7 @@ export default function ResultScreen() {
   return (
     <ScrollView
       style={styles.container}
-      contentContainerStyle={styles.scrollContent}
+      contentContainerStyle={[styles.scrollContent, { paddingTop: safeTop }]}
       showsVerticalScrollIndicator={false}
     >
       <View style={styles.content}>
