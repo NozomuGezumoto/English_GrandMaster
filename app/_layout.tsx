@@ -74,6 +74,7 @@ export default function RootLayout() {
         <Stack.Screen name="forgot-password" options={{ headerShown: false }} />
         <Stack.Screen name="link-account" options={{ headerShown: false }} />
         <Stack.Screen name="edit-profile" options={{ headerShown: false }} />
+        <Stack.Screen name="study-cards" options={{ headerShown: false }} />
     </Stack>
     </View>
     </ErrorBoundary>

@@ -38,7 +38,7 @@ export default function SignInScreen() {
         message = 'Cannot connect to server.';
         if (Constants.expoConfig?.extra?.useEmulator === true) {
           const isWeb = typeof window !== 'undefined';
-          const hostname = isWeb ? window.location.hostname : '';
+          const hostname = isWeb && window.location ? window.location.hostname : '';
           if (isWeb && (hostname === 'localhost' || hostname === '127.0.0.1')) {
             message += '\n\nIf opening from a phone, change the address bar to http://<PC\'s IP>:8081';
           } else {
@@ -57,7 +57,7 @@ export default function SignInScreen() {
       <Text style={styles.title}>Sign in</Text>
       <Text style={styles.subtitle}>Sign in with your email to access your account</Text>
 
-      {Platform.OS === 'web' && Constants.expoConfig?.extra?.useEmulator === true && typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') && (
+      {Platform.OS === 'web' && Constants.expoConfig?.extra?.useEmulator === true && typeof window !== 'undefined' && window.location && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') && (
         <View style={styles.mobileHintBanner}>
           <Text style={styles.mobileHintText}>On mobile, open http://&lt;PC's IP&gt;:8081</Text>
         </View>

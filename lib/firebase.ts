@@ -41,7 +41,7 @@ const getEmulatorHost = () => {
     const host = Constants.expoConfig.extra.emulatorHost;
     // 'localhost'が指定されている場合、実機ではExpoの開発サーバーhostUriからPCのIPを取得
     if (host === 'localhost') {
-      if (typeof window !== 'undefined') {
+      if (typeof window !== 'undefined' && window.location) {
         // Web: URLのホスト名がPCのIPならそれを使う（携帯のブラウザで http://PCのIP:8081 で開いた場合）
         const urlHost = window.location.hostname;
         if (urlHost !== 'localhost' && urlHost !== '127.0.0.1') {
@@ -63,7 +63,7 @@ const getEmulatorHost = () => {
     return host;
   }
   
-  if (typeof window !== 'undefined') {
+  if (typeof window !== 'undefined' && window.location) {
     const urlHost = window.location.hostname;
     if (urlHost !== 'localhost' && urlHost !== '127.0.0.1') {
       console.log(`[Firebase] Using URL hostname for emulator: ${urlHost}`);

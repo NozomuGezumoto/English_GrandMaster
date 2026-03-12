@@ -67,7 +67,7 @@ export default function BattleScreen() {
     console.log('[Battle] Component mounted');
     console.log('[Battle] useEmulator:', Constants.expoConfig?.extra?.useEmulator);
     console.log('[Battle] emulatorHost:', Constants.expoConfig?.extra?.emulatorHost);
-    if (typeof window !== 'undefined') {
+    if (typeof window !== 'undefined' && window.location) {
       console.log('[Battle] window.location.hostname:', window.location.hostname);
       console.log('[Battle] window.location.href:', window.location.href);
     }

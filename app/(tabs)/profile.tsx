@@ -11,6 +11,7 @@ import { doc, getDoc, getDocFromServer, collection, query, where, getDocs } from
 import { User as FirestoreUser, TierType, UserStatsToday, FriendRequest } from '../../types/firestore';
 import type { UserRank } from '../../types/firestore';
 import { COUNTRY_NAMES } from '../../lib/countries';
+import { getTodayStudyReviews, type StudyReviewEntry } from '../../lib/study-reviews-today';
 import { COLORS } from '../../lib/theme';
 
 type FriendSummary = {
@@ -122,6 +123,7 @@ export default function ProfileScreen() {
   const [pendingRequestsLoading, setPendingRequestsLoading] = useState(false);
   const [respondingToUid, setRespondingToUid] = useState<string | null>(null);
   const [avatarDisplayUrl, setAvatarDisplayUrl] = useState<string | null>(null);
+  const [todayStudyReviews, setTodayStudyReviews] = useState<StudyReviewEntry[]>([]);
 
   const loadPendingRequests = useCallback(async () => {
     const uid = auth.currentUser?.uid;
@@ -247,6 +249,8 @@ export default function ProfileScreen() {
             setAvatarDisplayUrl(null);
           }
           loadPendingRequests();
+          const reviews = await getTodayStudyReviews();
+          setTodayStudyReviews(reviews);
         } catch (err) {
           console.error('Error fetching user data:', err);
         } finally {
@@ -503,7 +507,7 @@ export default function ProfileScreen() {
           <View style={[styles.rankSection, PROFILE_COMPACT && styles.rankSectionCompact]}>
             {(userData.rankOverall ?? userData.rank) ? (
               <>
-                <Text style={styles.rankModeLabel}>Overall — 総合</Text>
+                <Text style={styles.rankModeLabel}>Overall</Text>
                 <View style={styles.rankRow}>
                   <Text style={[styles.tierPiece, PROFILE_COMPACT && styles.tierPieceCompact]}>
                     {TIER_INFO[(userData.rankOverall ?? userData.rank)!.tier]?.piece ?? '♙'}
@@ -581,7 +585,14 @@ export default function ProfileScreen() {
               <View style={styles.statsDivider} />
               <View style={styles.statsItem}>
                 <Text style={styles.statsItemLabel}>Dictation</Text>
-                <Text style={styles.statsItemValue}>{statsToday?.dictationSolved ?? 0} words</Text>
+                <Text style={styles.statsItemValue}>{statsToday?.dictationSolved ?? 0}</Text>
+              </View>
+              <View style={styles.statsDivider} />
+              <View style={styles.statsItem}>
+                <Text style={styles.statsItemLabel}>Review</Text>
+                <Text style={styles.statsItemValue}>
+                  {new Set(todayStudyReviews.map((e) => e.englishText)).size}
+                </Text>
               </View>
             </View>
           </View>
@@ -1254,6 +1265,26 @@ const styles = StyleSheet.create({
     width: 1,
     height: 28,
     backgroundColor: COLORS.border,
+  },
+  studyReviewsList: {
+    marginTop: 12,
+    paddingTop: 12,
+    borderTopWidth: 1,
+    borderTopColor: COLORS.border,
+  },
+  studyReviewsListLabel: {
+    fontSize: 12,
+    color: COLORS.muted,
+    marginBottom: 8,
+    fontWeight: '600',
+  },
+  studyReviewsScroll: {
+    maxHeight: 120,
+  },
+  studyReviewItem: {
+    fontSize: 13,
+    color: COLORS.text,
+    marginBottom: 4,
   },
   statsTotalLabel: {
     fontSize: 13,

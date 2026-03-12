@@ -1,5 +1,18 @@
 # App Store リリース手順
 
+## バージョンアップ時の注意（重要）
+
+このプロジェクトには **`ios/` フォルダが存在**するため、EAS ビルドでは **`app.json` の version は無視され、ネイティブ側の値が使われます**。  
+バージョンを上げる場合は、**次の3箇所をすべて更新**してください：
+
+1. **app.json** - `version`
+2. **ios/EnglishGrandMaster/Info.plist** - `CFBundleShortVersionString`
+3. **ios/EnglishGrandMaster.xcodeproj/project.pbxproj** - `MARKETING_VERSION`（Debug / Release 両方）
+
+更新し忘れると、ビルド結果が古いバージョンのままになります。
+
+---
+
 ## 前提
 
 - **Apple Developer プログラム**（$99/年）に登録済み

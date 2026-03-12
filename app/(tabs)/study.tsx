@@ -1,5 +1,6 @@
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity, ActivityIndicator, TextInput, Alert } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useRouter } from 'expo-router';
 import { useEffect, useState, useRef, type ReactElement } from 'react';
 import { collection, query, where, getDocs, orderBy, limit, doc, getDoc } from 'firebase/firestore';
 import { db, auth, functions, httpsCallable } from '../../lib/firebase';
@@ -11,7 +12,9 @@ import { getQuestionsForToeicBand } from '../../lib/study-questions';
 import { getListeningResponseQuestions, shuffleListeningChoices } from '../../lib/listening-response-questions';
 import { addStudyWrongListening, addStudyWrongDictation, getStudyWrongDictation, getStudyWrongListening, clearStudyWrongDictation, clearStudyWrongListening, type StudyWrongListeningEntry, type StudyWrongDictationEntry } from '../../lib/study-wrong-answers';
 import { getWordsForToeicBand, getTotalWordCount, type DictationEntry } from '../../lib/dictation-vocab';
+import { getStudyCardCounts } from '../../lib/study-cards';
 import { ensureAudioModeForSpeech } from '../../lib/audio-mode';
+import { StudyCardsTopContent } from '../components/StudyCardsTopContent';
 import { COLORS } from '../../lib/theme';
 import * as Speech from 'expo-speech';
 
@@ -24,7 +27,7 @@ interface WrongQuestion {
   matchMode: string;
 }
 
-type StudyTab = 'choice' | 'dictation' | 'listening_quiz';
+type StudyTab = 'choice' | 'dictation' | 'listening_quiz' | 'cards';
 type ChoiceSubTab = 'list' | 'wrong'; // 問題一覧（回答非表示） / 間違った回答（解説付き）
 type ListeningSubTab = 'list' | 'quiz' | 'wrong'; // 問題一覧（音声文のみ） / クイズ開始 / 間違った回答
 
@@ -32,6 +35,7 @@ const LIST_QUESTIONS_LIMIT_PER_LEVEL = 500;
 
 export default function StudyScreen() {
   const insets = useSafeAreaInsets();
+  const router = useRouter();
   const safeTop = Math.max(4, insets.top - 8);
   const [activeTab, setActiveTab] = useState<StudyTab>('choice');
   const [choiceSubTab, setChoiceSubTab] = useState<ChoiceSubTab>('list');
@@ -46,6 +50,13 @@ export default function StudyScreen() {
   const [listeningSubTab, setListeningSubTab] = useState<ListeningSubTab>('list');
   const [wrongListeningList, setWrongListeningList] = useState<StudyWrongListeningEntry[]>([]);
   const [listeningListQuestions, setListeningListQuestions] = useState<Question[]>([]);
+  const [studyCardsCounts, setStudyCardsCounts] = useState<{
+    total: number;
+    learning: number;
+    mastered: number;
+    archived: number;
+  } | null>(null);
+  const [studyCardsLoading, setStudyCardsLoading] = useState(false);
 
   useEffect(() => {
     if (activeTab !== 'listening_quiz' || listeningQuizStarted) return;
@@ -97,6 +108,15 @@ export default function StudyScreen() {
     };
     loadAllQuestionsForLevel();
   }, [activeTab, choiceSubTab, listLevel]);
+
+  useEffect(() => {
+    if (activeTab !== 'cards') return;
+    setStudyCardsLoading(true);
+    getStudyCardCounts()
+      .then(setStudyCardsCounts)
+      .catch(() => setStudyCardsCounts({ total: 0, learning: 0, mastered: 0, archived: 0 }))
+      .finally(() => setStudyCardsLoading(false));
+  }, [activeTab]);
 
   useEffect(() => {
     if (!auth.currentUser) return;
@@ -248,6 +268,14 @@ export default function StudyScreen() {
         >
           <Text style={[styles.tabText, activeTab === 'listening_quiz' && styles.tabTextActive]}>
             Listening Quiz
+          </Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={[styles.tab, activeTab === 'cards' && styles.tabActive]}
+          onPress={() => setActiveTab('cards')}
+        >
+          <Text style={[styles.tabText, activeTab === 'cards' && styles.tabTextActive]}>
+            Flashcards
           </Text>
         </TouchableOpacity>
       </View>
@@ -552,6 +580,16 @@ export default function StudyScreen() {
             )}
           </ScrollView>
         )
+      ) : activeTab === 'cards' ? (
+        <ScrollView style={styles.content} contentContainerStyle={{ paddingBottom: 24 }}>
+          <StudyCardsTopContent
+            counts={studyCardsCounts}
+            loading={studyCardsLoading}
+            onAdd={() => router.push('/study-cards')}
+            onReview={() => router.push('/study-cards')}
+            onList={() => router.push('/study-cards')}
+          />
+        </ScrollView>
       ) : (
         <DictationScreen />
       )}
