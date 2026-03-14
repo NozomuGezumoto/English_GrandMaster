@@ -8,6 +8,7 @@ import { getRandomListeningQuestionIds } from '../../lib/listening-response-ques
 import { signInAnonymously, signOut, onAuthStateChanged } from 'firebase/auth';
 import { doc, getDoc } from 'firebase/firestore';
 import { User as FirestoreUser, ToeicLevel } from '../../types/firestore';
+import { COUNTRY_NAMES } from '../../lib/countries';
 import { TOEIC_LEVELS, LEVEL_DISPLAY, ratingToToeicLevel } from '../../lib/levels';
 import Constants from 'expo-constants';
 import { playClickSound, preloadClickSound, clearClickSoundCache } from '../../lib/click-sound';
@@ -398,7 +399,7 @@ export default function BattleScreen() {
             </View>
             <View style={styles.userInfoRow}>
               <Text style={styles.userInfoLabel}>Country:</Text>
-              <Text style={styles.userInfoValue}>{userData.country || 'Not set'}</Text>
+              <Text style={styles.userInfoValue}>{userData.country ? (COUNTRY_NAMES[userData.country] ?? userData.country) : 'Not set'}</Text>
             </View>
             <View style={styles.userInfoRow}>
               <Text style={styles.userInfoLabel}>Rating:</Text>

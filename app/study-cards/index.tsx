@@ -7,7 +7,7 @@ import { View, Text, StyleSheet, TouchableOpacity, ScrollView, ActivityIndicator
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter, useFocusEffect } from 'expo-router';
 import { useState, useCallback } from 'react';
-import { getStudyDecks, getStudyCardCounts, getStudyCardCountsByExpressionType, createStudyDeck } from '../../lib/study-cards';
+import { getStudyDecks, getStudyCardCounts, getStudyCardCountsByExpressionType, createStudyDeck, deleteStudyDeck } from '../../lib/study-cards';
 import { EXPRESSION_TYPE_LABELS } from '../../types/study-card';
 import { COLORS } from '../../lib/theme';
 
@@ -69,6 +69,24 @@ export default function StudyCardsTop() {
     }
   };
 
+  const handleDeleteDeck = (deck: { id: string; name: string; total: number }) => {
+    Alert.alert(
+      'Delete deck',
+      `Delete "${deck.name}"? This will remove all ${deck.total} cards.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Delete', style: 'destructive', onPress: async () => {
+          try {
+            await deleteStudyDeck(deck.id);
+            await load();
+          } catch (e) {
+            Alert.alert('Error', e instanceof Error ? e.message : 'Failed to delete deck');
+          }
+        } },
+      ]
+    );
+  };
+
   return (
     <ScrollView style={[styles.container, { paddingTop: insets.top + 16 }]} contentContainerStyle={styles.content}>
       <TouchableOpacity style={styles.backButton} onPress={() => router.back()}>
@@ -86,6 +104,10 @@ export default function StudyCardsTop() {
             <Text style={styles.totalUnit}>cards</Text>
             <Text style={[styles.totalValue, { color: COLORS.gold, marginLeft: 16 }]}>{totalCounts.learning}</Text>
             <Text style={styles.totalUnit}>learning</Text>
+            <Text style={[styles.totalValue, { color: COLORS.muted, marginLeft: 16 }]}>{totalCounts.mastered}</Text>
+            <Text style={styles.totalUnit}>mastered</Text>
+            <Text style={[styles.totalValue, { color: COLORS.muted, marginLeft: 16 }]}>{totalCounts.archived}</Text>
+            <Text style={styles.totalUnit}>archived</Text>
           </View>
         </View>
       )}
@@ -116,6 +138,18 @@ export default function StudyCardsTop() {
                 <Text style={styles.deckName}>{deck.name} ({deck.total})</Text>
                 <View style={styles.deckActions}>
                   <TouchableOpacity
+                    style={[styles.deckActionBtn, styles.deckActionPrimary]}
+                    onPress={() => router.push(`/study-cards/review?deckId=${deck.id}`)}
+                  >
+                    <Text style={[styles.deckActionText, styles.deckActionTextGold]}>Review</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={styles.deckActionBtn}
+                    onPress={() => router.push(`/study-cards/list?deckId=${deck.id}`)}
+                  >
+                    <Text style={styles.deckActionText}>List</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
                     style={styles.deckActionBtn}
                     onPress={() => router.push(`/study-cards/create?deckId=${deck.id}`)}
                   >
@@ -128,16 +162,10 @@ export default function StudyCardsTop() {
                     <Text style={styles.deckActionText}>Bulk</Text>
                   </TouchableOpacity>
                   <TouchableOpacity
-                    style={[styles.deckActionBtn, styles.deckActionPrimary]}
-                    onPress={() => router.push(`/study-cards/review?deckId=${deck.id}`)}
+                    style={[styles.deckActionBtn, styles.deckActionDanger]}
+                    onPress={() => handleDeleteDeck(deck)}
                   >
-                    <Text style={[styles.deckActionText, styles.deckActionTextGold]}>Review</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    style={styles.deckActionBtn}
-                    onPress={() => router.push(`/study-cards/list?deckId=${deck.id}`)}
-                  >
-                    <Text style={styles.deckActionText}>List</Text>
+                    <Text style={styles.deckActionTextDanger}>Delete</Text>
                   </TouchableOpacity>
                 </View>
               </View>
@@ -225,7 +253,9 @@ const styles = StyleSheet.create({
   },
   totalRow: {
     flexDirection: 'row',
+    flexWrap: 'wrap',
     alignItems: 'baseline',
+    gap: 4,
   },
   totalValue: {
     fontSize: 24,
@@ -241,29 +271,31 @@ const styles = StyleSheet.create({
     marginTop: 40,
   },
   courseSection: {
-    marginBottom: 24,
+    marginBottom: 16,
   },
   courseSectionTitle: {
     fontSize: 16,
     fontWeight: '700',
     color: COLORS.gold,
-    marginBottom: 12,
+    marginBottom: 8,
   },
   courseList: {
-    gap: 10,
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
   },
   courseCard: {
+    width: '48%',
     backgroundColor: COLORS.surface,
-    borderRadius: 12,
-    padding: 14,
+    borderRadius: 10,
+    padding: 10,
     borderWidth: 1,
     borderColor: COLORS.border,
   },
   courseLabel: {
-    fontSize: 16,
+    fontSize: 15,
     fontWeight: '600',
     color: COLORS.text,
-    marginBottom: 4,
   },
   courseStats: {
     fontSize: 13,
@@ -308,6 +340,10 @@ const styles = StyleSheet.create({
     borderColor: COLORS.gold,
     backgroundColor: COLORS.primary,
   },
+  deckActionDanger: {
+    borderColor: '#5C1A24',
+    flex: 0.8,
+  },
   deckActionText: {
     fontSize: 14,
     fontWeight: '600',
@@ -315,6 +351,11 @@ const styles = StyleSheet.create({
   },
   deckActionTextGold: {
     color: COLORS.gold,
+  },
+  deckActionTextDanger: {
+    color: '#B85450',
+    fontSize: 14,
+    fontWeight: '600',
   },
   addDeckButton: {
     paddingVertical: 16,

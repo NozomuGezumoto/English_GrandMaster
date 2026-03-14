@@ -6,12 +6,21 @@
 import { View, Text, StyleSheet, FlatList, TouchableOpacity, ActivityIndicator } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter, useFocusEffect, useLocalSearchParams } from 'expo-router';
-import { useCallback, useState, useEffect } from 'react';
-import { getStudyCards } from '../../lib/study-cards';
+import { useCallback, useState, useEffect, useMemo } from 'react';
+import { getStudyCards, setReviewOrder } from '../../lib/study-cards';
 import { STATUS_LABELS, EXPRESSION_TYPE_LABELS, type StudyCard, type StudyCardStatus } from '../../types/study-card';
 import { COLORS } from '../../lib/theme';
 
 const STATUS_OPTIONS: (StudyCardStatus | 'all')[] = ['all', 'learning', 'mastered', 'archived'];
+
+function shuffleArray<T>(arr: T[]): T[] {
+  const result = [...arr];
+  for (let i = result.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [result[i], result[j]] = [result[j], result[i]];
+  }
+  return result;
+}
 
 function StudyCardListItem({
   card,
@@ -80,10 +89,25 @@ export default function StudyCardsListScreen() {
     load();
   }, [load]));
 
-  const filtered =
-    filterStatus === 'all'
-      ? cards
-      : cards.filter((c) => c.status === filterStatus);
+  const filtered = useMemo(
+    () => (filterStatus === 'all' ? cards : cards.filter((c) => c.status === filterStatus)),
+    [cards, filterStatus]
+  );
+
+  const [displayData, setDisplayData] = useState<StudyCard[]>([]);
+  useEffect(() => {
+    setDisplayData(filtered);
+  }, [filtered]);
+
+  const handleShuffle = useCallback(() => {
+    setDisplayData(shuffleArray([...filtered]));
+  }, [filtered]);
+
+  const handleStartReview = useCallback(async () => {
+    if (!deckId || displayData.length === 0) return;
+    await setReviewOrder(deckId, displayData.map((c) => c.id));
+    router.push(`/study-cards/review?deckId=${deckId}&fromList=1`);
+  }, [deckId, displayData, router]);
 
   return (
     <View style={[styles.container, { paddingTop: insets.top + 16 }]}>
@@ -105,6 +129,20 @@ export default function StudyCardsListScreen() {
             </Text>
           </TouchableOpacity>
         ))}
+        <TouchableOpacity
+          style={[styles.filterChip, styles.shuffleButton]}
+          onPress={handleShuffle}
+          disabled={loading || filtered.length === 0}
+        >
+          <Text style={styles.shuffleButtonText}>🔀 Shuffle</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={[styles.filterChip, styles.reviewButton]}
+          onPress={handleStartReview}
+          disabled={loading || displayData.length === 0}
+        >
+          <Text style={styles.reviewButtonText}>Review</Text>
+        </TouchableOpacity>
       </View>
 
       {loading ? (
@@ -116,7 +154,7 @@ export default function StudyCardsListScreen() {
         </View>
       ) : (
         <FlatList
-          data={filtered}
+          data={displayData}
           keyExtractor={(item) => item.id}
           renderItem={({ item }) => (
             <StudyCardListItem
@@ -178,6 +216,21 @@ const styles = StyleSheet.create({
     color: COLORS.text,
   },
   filterChipTextActive: {
+    color: COLORS.gold,
+    fontWeight: '600',
+  },
+  shuffleButton: {
+    borderColor: COLORS.gold,
+  },
+  shuffleButtonText: {
+    color: COLORS.gold,
+    fontWeight: '600',
+  },
+  reviewButton: {
+    backgroundColor: COLORS.primary,
+    borderColor: COLORS.gold,
+  },
+  reviewButtonText: {
     color: COLORS.gold,
     fontWeight: '600',
   },

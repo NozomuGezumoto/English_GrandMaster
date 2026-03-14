@@ -261,7 +261,7 @@ export default function LoginScreen() {
                       selectedCountry === country.code && styles.countryOptionTextSelected,
                     ]}
                   >
-                    {country.name} ({country.code})
+                    {country.name}
                   </Text>
                 </TouchableOpacity>
               ))}

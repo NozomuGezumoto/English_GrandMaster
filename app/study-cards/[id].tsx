@@ -2,11 +2,11 @@
  * カード詳細・編集画面
  */
 
-import { View, Text, StyleSheet, TextInput, TouchableOpacity, ScrollView, ActivityIndicator } from 'react-native';
+import { View, Text, StyleSheet, TextInput, TouchableOpacity, ScrollView, ActivityIndicator, Alert } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import { useEffect, useState } from 'react';
-import { getStudyCard, updateStudyCard } from '../../lib/study-cards';
+import { getStudyCard, updateStudyCard, deleteStudyCard } from '../../lib/study-cards';
 import { EXPRESSION_TYPE_LABELS, STATUS_LABELS, type StudyCard, type StudyCardExpressionType, type StudyCardStatus } from '../../types/study-card';
 import { COLORS } from '../../lib/theme';
 
@@ -29,6 +29,7 @@ export default function StudyCardDetailScreen() {
   const [expressionType, setExpressionType] = useState<StudyCardExpressionType | null>(null);
   const [status, setStatus] = useState<StudyCardStatus>('learning');
   const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
   useEffect(() => {
     if (!id || !deckId) {
@@ -71,6 +72,34 @@ export default function StudyCardDetailScreen() {
 
   const handleStartReview = () => {
     router.push(`/study-cards/review?deckId=${deckId}`);
+  };
+
+  const handleDelete = () => {
+    if (!card) return;
+    Alert.alert(
+      'Delete card',
+      `Delete "${card.englishText.slice(0, 50)}${card.englishText.length > 50 ? '…' : ''}"? This cannot be undone.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            if (!deckId || !card) return;
+            setDeleting(true);
+            try {
+              await deleteStudyCard(deckId, card.id);
+              router.replace(`/study-cards/list?deckId=${deckId}`);
+            } catch (e) {
+              console.error('[StudyCard] delete error:', e);
+              Alert.alert('Error', 'Failed to delete card');
+            } finally {
+              setDeleting(false);
+            }
+          },
+        },
+      ]
+    );
   };
 
   if (loading || !card || !deckId) {
@@ -181,6 +210,13 @@ export default function StudyCardDetailScreen() {
           </TouchableOpacity>
           <TouchableOpacity style={styles.reviewButton} onPress={handleStartReview}>
             <Text style={styles.reviewButtonText}>Review</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.deleteButton, deleting && styles.deleteButtonDisabled]}
+            onPress={handleDelete}
+            disabled={deleting}
+          >
+            <Text style={styles.deleteButtonText}>{deleting ? 'Deleting...' : 'Delete'}</Text>
           </TouchableOpacity>
         </>
       )}
@@ -363,10 +399,26 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     borderWidth: 1,
     borderColor: COLORS.gold,
+    marginBottom: 12,
   },
   reviewButtonText: {
     color: COLORS.gold,
     fontSize: 18,
+    fontWeight: '600',
+  },
+  deleteButton: {
+    paddingVertical: 14,
+    borderRadius: 12,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  deleteButtonDisabled: {
+    opacity: 0.6,
+  },
+  deleteButtonText: {
+    color: COLORS.muted,
+    fontSize: 16,
     fontWeight: '600',
   },
 });

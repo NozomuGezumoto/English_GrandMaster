@@ -1,4 +1,4 @@
-import { View, Text, StyleSheet, TouchableOpacity, Image, ActivityIndicator, ScrollView, Clipboard, TextInput, Alert, useWindowDimensions, Platform } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, Image, ActivityIndicator, ScrollView, Clipboard, TextInput, Alert, useWindowDimensions, Platform, Modal, Pressable } from 'react-native';
 
 const PROFILE_COMPACT = true; // 必要な情報を1画面に収めるコンパクト表示
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -12,6 +12,9 @@ import { User as FirestoreUser, TierType, UserStatsToday, FriendRequest } from '
 import type { UserRank } from '../../types/firestore';
 import { COUNTRY_NAMES } from '../../lib/countries';
 import { getTodayStudyReviews, type StudyReviewEntry } from '../../lib/study-reviews-today';
+import { getTodayStudyTimeSeconds, getThisWeekStudyTimeSeconds, getThisMonthStudySeconds } from '../../lib/study-time-today';
+import { formatStudySeconds } from '../../lib/study-history';
+import { getStudyTimeTarget, setStudyTimeTarget, type StudyTimeTarget } from '../../lib/study-time-target';
 import { COLORS } from '../../lib/theme';
 
 type FriendSummary = {
@@ -124,6 +127,11 @@ export default function ProfileScreen() {
   const [respondingToUid, setRespondingToUid] = useState<string | null>(null);
   const [avatarDisplayUrl, setAvatarDisplayUrl] = useState<string | null>(null);
   const [todayStudyReviews, setTodayStudyReviews] = useState<StudyReviewEntry[]>([]);
+  const [todayStudyTimeSeconds, setTodayStudyTimeSeconds] = useState(0);
+  const [thisWeekStudyTimeSeconds, setThisWeekStudyTimeSeconds] = useState(0);
+  const [thisMonthStudySeconds, setThisMonthStudySeconds] = useState(0);
+  const [studyTimeTarget, setStudyTimeTargetState] = useState<StudyTimeTarget | null>(null);
+  const [showTargetModal, setShowTargetModal] = useState(false);
 
   const loadPendingRequests = useCallback(async () => {
     const uid = auth.currentUser?.uid;
@@ -208,6 +216,17 @@ export default function ProfileScreen() {
     setFriendsList(list);
   }, []);
 
+  // プロフィール表示時に毎回復習数・学習時間・目標を再取得
+  useFocusEffect(
+    useCallback(() => {
+      getTodayStudyReviews().then(setTodayStudyReviews);
+      getTodayStudyTimeSeconds().then(setTodayStudyTimeSeconds);
+      getStudyTimeTarget().then(setStudyTimeTargetState);
+      getThisWeekStudyTimeSeconds().then(setThisWeekStudyTimeSeconds);
+      getThisMonthStudySeconds().then(setThisMonthStudySeconds);
+    }, [])
+  );
+
   useFocusEffect(
     useCallback(() => {
       const user = auth.currentUser;
@@ -218,6 +237,8 @@ export default function ProfileScreen() {
         setFriendCodeError(null);
         setFriendsList([]);
         setLoading(false);
+        getTodayStudyReviews().then(setTodayStudyReviews);
+        getTodayStudyTimeSeconds().then(setTodayStudyTimeSeconds);
         return;
       }
       setLoading(true);
@@ -249,8 +270,18 @@ export default function ProfileScreen() {
             setAvatarDisplayUrl(null);
           }
           loadPendingRequests();
-          const reviews = await getTodayStudyReviews();
+          const [reviews, timeSec, target, weekSec, monthSec] = await Promise.all([
+            getTodayStudyReviews(),
+            getTodayStudyTimeSeconds(),
+            getStudyTimeTarget(),
+            getThisWeekStudyTimeSeconds(),
+            getThisMonthStudySeconds(),
+          ]);
           setTodayStudyReviews(reviews);
+          setTodayStudyTimeSeconds(timeSec);
+          setStudyTimeTargetState(target);
+          setThisWeekStudyTimeSeconds(weekSec);
+          setThisMonthStudySeconds(monthSec);
         } catch (err) {
           console.error('Error fetching user data:', err);
         } finally {
@@ -259,6 +290,7 @@ export default function ProfileScreen() {
       })();
     }, [loadFriendCodeAndList, loadPendingRequests])
   );
+
 
   const handleLookupByCode = useCallback(async () => {
     const trimmed = addCode.trim().toUpperCase();
@@ -500,7 +532,7 @@ export default function ProfileScreen() {
           )}
           <Text style={[styles.displayName, PROFILE_COMPACT && styles.displayNameCompact]}>{userData.displayName}</Text>
           {userData.country && (
-            <Text style={styles.country}>Country: {userData.country}</Text>
+            <Text style={styles.country}>Country: {COUNTRY_NAMES[userData.country] ?? userData.country}</Text>
           )}
 
           {/* ランク・称号: 総合（Overall）のみ Grandmaster 称号。rankOverall ?? rank */}
@@ -568,39 +600,244 @@ export default function ProfileScreen() {
 
         {/* 今日の学習 */}
         <View style={[styles.statsSection, PROFILE_COMPACT && styles.statsSectionCompact]}>
-          <Text style={[styles.sectionTitle, PROFILE_COMPACT && styles.sectionTitleCompact]}>Today&apos;s learning</Text>
-          <View style={[styles.statsCard, PROFILE_COMPACT && styles.statsCardCompact]}>
-            <View style={[styles.statsRow, PROFILE_COMPACT && styles.statsRowCompact]}>
+          <Text style={[styles.sectionTitle, PROFILE_COMPACT && styles.sectionTitleCompact]}>Learning & Progress</Text>
+          <View style={[styles.statsCard, styles.todayLearningCard, PROFILE_COMPACT && styles.statsCardCompact]}>
+            {/* 上段: 学習内訳（Battles/W-L をやや強く） */}
+            <View style={[styles.statsRow, styles.todayLearningTopRow, PROFILE_COMPACT && styles.statsRowCompact]}>
               <View style={styles.statsItem}>
                 <Text style={styles.statsItemLabel}>Battles</Text>
-                <Text style={styles.statsItemValue}>{statsToday?.battles ?? 0}</Text>
+                <Text style={[
+                  styles.statsItemValueToday,
+                  (statsToday?.battles ?? 0) === 0 && styles.statsItemValueZero,
+                  (statsToday?.battles ?? 0) > 0 && styles.statsItemValueTodayGold,
+                ]}>
+                  {statsToday?.battles ?? 0}
+                </Text>
               </View>
               <View style={styles.statsDivider} />
               <View style={styles.statsItem}>
                 <Text style={styles.statsItemLabel}>W–L (today)</Text>
-                <Text style={styles.statsItemValue}>
+                <Text style={[
+                  styles.statsItemValueToday,
+                  (!statsToday || (statsToday.wins === 0 && statsToday.losses === 0)) && styles.statsItemValueZero,
+                  statsToday && (statsToday.wins > 0 || statsToday.losses > 0) && styles.statsItemValueTodayGold,
+                ]}>
                   {statsToday ? `${statsToday.wins}–${statsToday.losses}` : '0–0'}
                 </Text>
               </View>
               <View style={styles.statsDivider} />
               <View style={styles.statsItem}>
                 <Text style={styles.statsItemLabel}>Dictation</Text>
-                <Text style={styles.statsItemValue}>{statsToday?.dictationSolved ?? 0}</Text>
+                <Text style={[
+                  styles.statsItemValueToday,
+                  (statsToday?.dictationSolved ?? 0) === 0 && styles.statsItemValueZero,
+                  (statsToday?.dictationSolved ?? 0) > 0 && styles.statsItemValueTodayMuted,
+                ]}>
+                  {statsToday?.dictationSolved ?? 0}
+                </Text>
               </View>
               <View style={styles.statsDivider} />
               <View style={styles.statsItem}>
-                <Text style={styles.statsItemLabel}>Review</Text>
-                <Text style={styles.statsItemValue}>
-                  {new Set(todayStudyReviews.map((e) => e.englishText)).size}
+                <Text style={styles.statsItemLabel}>Flashcards</Text>
+                <Text style={[
+                  styles.statsItemValueToday,
+                  todayStudyReviews.length === 0 && styles.statsItemValueZero,
+                  todayStudyReviews.length > 0 && styles.statsItemValueTodayMuted,
+                ]}>
+                  {todayStudyReviews.length}
                 </Text>
+              </View>
+            </View>
+            {/* 中央: Time（目立たせる）+ 詳細ボタン */}
+            <View style={[
+              styles.statsRow,
+              styles.timeRow,
+              styles.timeRowWithButton,
+              PROFILE_COMPACT && styles.statsRowCompact,
+            ]}>
+              <TouchableOpacity
+                style={styles.timeRowContent}
+                onPress={() => setShowTargetModal(true)}
+                activeOpacity={0.7}
+              >
+                <Text style={styles.timeRowLabel}>Time</Text>
+                <Text style={styles.timeRowValue}>
+                  {todayStudyTimeSeconds >= 60
+                    ? `${Math.floor(todayStudyTimeSeconds / 60)}m ${todayStudyTimeSeconds % 60}s`
+                    : `${todayStudyTimeSeconds}s`}
+                </Text>
+                {!studyTimeTarget || studyTimeTarget.minutes <= 0 ? (
+                  <Text style={[styles.statsItemHint, styles.statsItemHintAction]}>Set target →</Text>
+                ) : null}
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.timeDetailButton}
+                onPress={() => router.push('/year-review')}
+                activeOpacity={0.7}
+              >
+                <Text style={styles.timeDetailButtonText}>Details</Text>
+              </TouchableOpacity>
+            </View>
+            {/* Progress バー + Daily Goal（目標設定時のみ） */}
+            {studyTimeTarget && studyTimeTarget.minutes > 0 && (
+              <View style={[styles.statsRow, styles.progressRow, PROFILE_COMPACT && styles.statsRowCompact]}>
+                <View style={styles.progressContainer}>
+                  <Text style={styles.progressLabel}>Progress</Text>
+                  <View style={styles.progressBarBg}>
+                    <View
+                      style={[
+                        styles.progressBarFill,
+                        {
+                          width: `${Math.min(
+                            100,
+                            (studyTimeTarget.mode === 'daily'
+                              ? todayStudyTimeSeconds
+                              : thisWeekStudyTimeSeconds) /
+                              (studyTimeTarget.minutes * 60) *
+                              100
+                          )}%`,
+                        },
+                      ]}
+                    />
+                  </View>
+                  <TouchableOpacity onPress={() => setShowTargetModal(true)} activeOpacity={0.7} style={styles.progressGoalRow}>
+                    <View style={styles.progressGoalContent}>
+                      <Text style={styles.progressGoalLabel}>
+                        {studyTimeTarget.mode === 'daily' ? 'Daily Goal' : 'Weekly Goal'}
+                      </Text>
+                      <Text style={styles.progressGoalValue}>
+                        {studyTimeTarget.mode === 'daily'
+                          ? `${studyTimeTarget.minutes}m`
+                          : `${studyTimeTarget.minutes}m/week`}
+                      </Text>
+                    </View>
+                    <View style={styles.progressGoalTapWrap}>
+                      <Text style={styles.progressGoalTapText}>Tap to change</Text>
+                    </View>
+                  </TouchableOpacity>
+                </View>
+              </View>
+            )}
+            {/* Study history: This week / This month（重複を避け、目標期間は上段の Time + 進捗で表示） */}
+            <View style={[styles.statsRow, styles.statsRowLast, styles.studyHistoryRow, PROFILE_COMPACT && styles.statsRowCompact]}>
+              <View style={styles.statsItem}>
+                <Text style={styles.statsItemLabel}>This week</Text>
+                <Text style={styles.studyHistoryValue}>{formatStudySeconds(thisWeekStudyTimeSeconds)}</Text>
+              </View>
+              <View style={styles.statsDivider} />
+              <View style={styles.statsItem}>
+                <Text style={styles.statsItemLabel}>This month</Text>
+                <Text style={styles.studyHistoryValue}>{formatStudySeconds(thisMonthStudySeconds)}</Text>
               </View>
             </View>
           </View>
         </View>
 
+        {/* 目標設定モーダル */}
+        <Modal
+          visible={showTargetModal}
+          transparent
+          animationType="fade"
+          onRequestClose={() => setShowTargetModal(false)}
+        >
+          <TouchableOpacity
+            style={styles.modalOverlay}
+            activeOpacity={1}
+            onPress={() => setShowTargetModal(false)}
+          >
+            <View style={styles.targetModalContent} onStartShouldSetResponder={() => true}>
+              <ScrollView showsVerticalScrollIndicator={false} style={styles.targetModalScroll} contentContainerStyle={styles.targetModalScrollContent}>
+              <Text style={styles.targetModalTitle}>Learning time target</Text>
+              <View style={styles.targetModalRow}>
+                <TouchableOpacity
+                  style={[
+                    styles.targetModeButton,
+                    (studyTimeTarget?.mode ?? 'daily') === 'daily' && styles.targetModeButtonActive,
+                  ]}
+                  onPress={() =>
+                    setStudyTimeTargetState((prev) => ({ ...(prev ?? { mode: 'daily', minutes: 30 }), mode: 'daily' }))
+                  }
+                >
+                  <Text
+                    style={[
+                      styles.targetModeButtonText,
+                      (studyTimeTarget?.mode ?? 'daily') === 'daily' && styles.targetModeButtonTextActive,
+                    ]}
+                  >
+                    Daily
+                  </Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[
+                    styles.targetModeButton,
+                    (studyTimeTarget?.mode ?? 'daily') === 'weekly' && styles.targetModeButtonActive,
+                  ]}
+                  onPress={() =>
+                    setStudyTimeTargetState((prev) => ({ ...(prev ?? { mode: 'weekly', minutes: 120 }), mode: 'weekly' }))
+                  }
+                >
+                  <Text
+                    style={[
+                      styles.targetModeButtonText,
+                      (studyTimeTarget?.mode ?? 'daily') === 'weekly' && styles.targetModeButtonTextActive,
+                    ]}
+                  >
+                    Weekly
+                  </Text>
+                </TouchableOpacity>
+              </View>
+              <View style={styles.targetModalRow}>
+                <Text style={styles.targetModalLabel}>Target time</Text>
+                <View style={styles.targetTimeRow}>
+                  <View style={styles.targetTimeInputWrap}>
+                    <TextInput
+                      style={styles.targetMinutesInput}
+                      keyboardType="number-pad"
+                      value={String(Math.floor((studyTimeTarget?.minutes ?? 30) / 60))}
+                      onChangeText={(t) => {
+                        const h = parseInt(t.replace(/\D/g, ''), 10) || 0;
+                        const m = (studyTimeTarget?.minutes ?? 30) % 60;
+                        setStudyTimeTargetState((prev) => ({ ...(prev ?? { mode: 'daily', minutes: 30 }), minutes: h * 60 + m }));
+                      }}
+                      placeholder="0"
+                    />
+                    <Text style={styles.targetTimeUnit}>h</Text>
+                  </View>
+                  <View style={styles.targetTimeInputWrap}>
+                    <TextInput
+                      style={styles.targetMinutesInput}
+                      keyboardType="number-pad"
+                      value={String((studyTimeTarget?.minutes ?? 30) % 60)}
+                      onChangeText={(t) => {
+                        const m = Math.min(59, parseInt(t.replace(/\D/g, ''), 10) || 0);
+                        const h = Math.floor((studyTimeTarget?.minutes ?? 30) / 60);
+                        setStudyTimeTargetState((prev) => ({ ...(prev ?? { mode: 'daily', minutes: 30 }), minutes: h * 60 + m }));
+                      }}
+                      placeholder="30"
+                    />
+                    <Text style={styles.targetTimeUnit}>m</Text>
+                  </View>
+                </View>
+              </View>
+              </ScrollView>
+              <TouchableOpacity
+                style={styles.targetModalSave}
+                onPress={async () => {
+                  if (studyTimeTarget) {
+                    await setStudyTimeTarget(studyTimeTarget);
+                    setShowTargetModal(false);
+                  }
+                }}
+              >
+                <Text style={styles.targetModalSaveText}>Save</Text>
+              </TouchableOpacity>
+            </View>
+          </TouchableOpacity>
+        </Modal>
+
         {/* 戦績セクション */}
         <View style={[styles.statsSection, PROFILE_COMPACT && styles.statsSectionCompact]}>
-          <Text style={[styles.sectionTitle, PROFILE_COMPACT && styles.sectionTitleCompact]}>Stats</Text>
+          <Text style={[styles.sectionTitle, PROFILE_COMPACT && styles.sectionTitleCompact]}>Battle</Text>
           <View style={[styles.statsCard, PROFILE_COMPACT && styles.statsCardCompact]}>
             <View style={[styles.statsRow, PROFILE_COMPACT && styles.statsRowCompact]}>
               <View style={styles.statsItem}>
@@ -1098,32 +1335,34 @@ const styles = StyleSheet.create({
     paddingTop: 8,
   },
   rankByModeTitle: {
-    fontSize: 12,
+    fontSize: 14,
     fontWeight: '600',
     color: COLORS.muted,
-    marginBottom: 8,
+    marginBottom: 10,
   },
   rankByModeRow: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingVertical: 4,
+    paddingVertical: 8,
   },
   rankByModeRowCompact: {
-    paddingVertical: 2,
+    paddingVertical: 6,
   },
   rankByModeLabel: {
-    fontSize: 13,
+    fontSize: 14,
     color: COLORS.text,
+    fontWeight: '600',
   },
   rankByModeValue: {
-    fontSize: 13,
-    fontWeight: '600',
-    color: COLORS.text,
+    fontSize: 18,
+    fontWeight: '700',
+    color: COLORS.gold,
   },
   rankByModeTier: {
-    fontSize: 12,
-    color: COLORS.muted,
+    fontSize: 14,
+    color: COLORS.gold,
+    fontWeight: '600',
   },
   titlesContainer: {
     width: '100%',
@@ -1225,6 +1464,12 @@ const styles = StyleSheet.create({
     paddingBottom: 0,
     justifyContent: 'space-between',
   },
+  studyHistoryRow: {},
+  studyHistoryValue: {
+    fontSize: 26,
+    fontWeight: '800',
+    color: COLORS.gold,
+  },
   statsItem: {
     flex: 1,
     alignItems: 'center',
@@ -1242,6 +1487,315 @@ const styles = StyleSheet.create({
   },
   statsItemValueCompact: {
     fontSize: 18,
+  },
+  statsItemFull: {
+    width: '100%',
+    alignItems: 'flex-start',
+  },
+  statsItemHint: {
+    fontSize: 10,
+    color: COLORS.muted,
+    marginTop: 2,
+  },
+  statsItemHintAction: {
+    color: COLORS.gold,
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  statsItemHintChange: {
+    color: COLORS.correct,
+    fontWeight: '600',
+  },
+  statsItemValueToday: {
+    fontSize: 20,
+    fontWeight: '700',
+  },
+  statsItemValueZero: {
+    color: COLORS.incorrect,
+  },
+  statsItemValueTodayGold: {
+    color: COLORS.gold,
+  },
+  statsItemValueTodayMuted: {
+    color: COLORS.text,
+  },
+  todayLearningCard: {
+    paddingHorizontal: 18,
+  },
+  todayLearningTopRow: {
+    paddingVertical: 10,
+  },
+  statsItemValuePrimary: {
+    fontSize: 24,
+    fontWeight: '700',
+    color: COLORS.gold,
+  },
+  statsItemValueSecondary: {
+    fontSize: 18,
+    fontWeight: '600',
+    color: COLORS.text,
+    opacity: 0.95,
+  },
+  timeRow: {
+    paddingVertical: 14,
+    borderBottomWidth: 0,
+    justifyContent: 'space-between',
+  },
+  timeRowWithButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  timeRowContent: {
+    flex: 1,
+    alignItems: 'flex-start',
+  },
+  timeDetailButton: {
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    marginLeft: 8,
+    borderRadius: 8,
+    backgroundColor: COLORS.surface,
+    borderWidth: 1,
+    borderColor: COLORS.gold,
+    justifyContent: 'center',
+  },
+  timeDetailButtonText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: COLORS.gold,
+  },
+  timeRowLabel: {
+    fontSize: 14,
+    color: COLORS.muted,
+    marginBottom: 4,
+    fontWeight: '700',
+  },
+  timeRowValue: {
+    fontSize: 28,
+    fontWeight: '800',
+    color: COLORS.gold,
+    letterSpacing: 0.5,
+  },
+  progressGoalRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginTop: 10,
+    gap: 12,
+  },
+  progressGoalContent: {
+    flexDirection: 'row',
+    alignItems: 'baseline',
+    gap: 6,
+  },
+  progressGoalLabel: {
+    fontSize: 14,
+    color: COLORS.text,
+    fontWeight: '600',
+  },
+  progressGoalValue: {
+    fontSize: 16,
+    color: COLORS.gold,
+    fontWeight: '700',
+  },
+  progressGoalTapWrap: {
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 8,
+    backgroundColor: COLORS.surface,
+    borderWidth: 1,
+    borderColor: COLORS.gold,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  progressGoalTapText: {
+    fontSize: 13,
+    color: COLORS.gold,
+    fontWeight: '600',
+  },
+  progressGoalHint: {
+    fontSize: 11,
+    color: COLORS.muted,
+  },
+  progressRow: {
+    marginTop: 8,
+    paddingTop: 12,
+    borderTopWidth: 1,
+    borderTopColor: COLORS.border,
+  },
+  progressRowTop: {
+    marginTop: 0,
+    paddingTop: 0,
+    paddingBottom: 12,
+    marginBottom: 4,
+    borderTopWidth: 0,
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.border,
+  },
+  progressLabel: {
+    fontSize: 14,
+    color: COLORS.text,
+    fontWeight: '600',
+    marginBottom: 6,
+  },
+  progressContainer: {
+    width: '100%',
+  },
+  progressBarBg: {
+    height: 8,
+    backgroundColor: COLORS.surface,
+    borderRadius: 4,
+    overflow: 'hidden',
+  },
+  progressBarFill: {
+    height: '100%',
+    backgroundColor: COLORS.gold,
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 24,
+  },
+  targetModalContent: {
+    backgroundColor: COLORS.surface,
+    borderRadius: 16,
+    padding: 24,
+    width: '100%',
+    maxWidth: 320,
+    maxHeight: '85%',
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  targetModalScroll: {
+    flexGrow: 1,
+    maxHeight: 400,
+  },
+  targetModalScrollContent: {
+    paddingBottom: 8,
+  },
+  targetTimeFieldWrap: {
+    flex: 1,
+  },
+  targetTimeFieldLabel: {
+    fontSize: 11,
+    color: COLORS.muted,
+    marginBottom: 4,
+    fontWeight: '600',
+  },
+  targetModalTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: COLORS.gold,
+    marginBottom: 20,
+  },
+  targetModalRow: {
+    marginBottom: 16,
+  },
+  targetModeButton: {
+    paddingVertical: 12,
+    paddingHorizontal: 20,
+    borderRadius: 10,
+    backgroundColor: COLORS.background,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    marginRight: 12,
+  },
+  targetModeButtonActive: {
+    borderColor: COLORS.gold,
+    backgroundColor: COLORS.primary,
+  },
+  targetModeButtonText: {
+    fontSize: 16,
+    color: COLORS.muted,
+    fontWeight: '600',
+  },
+  targetModeButtonTextActive: {
+    color: COLORS.gold,
+  },
+  targetModalLabel: {
+    fontSize: 14,
+    color: COLORS.muted,
+    marginBottom: 8,
+    fontWeight: '600',
+  },
+  targetMinutesInput: {
+    flex: 1,
+    backgroundColor: 'transparent',
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    fontSize: 18,
+    color: COLORS.text,
+  },
+  targetTimeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 16,
+  },
+  targetTimeInputWrap: {
+    flex: 1,
+    flexBasis: 0,
+    minWidth: 0,
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: COLORS.background,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: 10,
+    overflow: 'hidden',
+  },
+  targetTimeUnit: {
+    fontSize: 16,
+    color: COLORS.gold,
+    fontWeight: '600',
+    minWidth: 28,
+    textAlign: 'center',
+  },
+  targetPresetLabel: {
+    fontSize: 12,
+    color: COLORS.muted,
+    marginBottom: 8,
+    fontWeight: '600',
+  },
+  targetPresetRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  targetPresetButton: {
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    borderRadius: 8,
+    backgroundColor: COLORS.background,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  targetPresetButtonActive: {
+    borderColor: COLORS.gold,
+    backgroundColor: COLORS.primary,
+  },
+  targetPresetButtonText: {
+    fontSize: 14,
+    color: COLORS.muted,
+    fontWeight: '600',
+  },
+  targetPresetButtonTextActive: {
+    color: COLORS.gold,
+  },
+  targetModalSave: {
+    backgroundColor: COLORS.primary,
+    borderWidth: 1,
+    borderColor: COLORS.gold,
+    borderRadius: 12,
+    paddingVertical: 14,
+    alignItems: 'center',
+    marginTop: 8,
+  },
+  targetModalSaveText: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: COLORS.gold,
   },
   ratingRow: {
     flexDirection: 'row',

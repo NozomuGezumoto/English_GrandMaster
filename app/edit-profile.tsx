@@ -224,7 +224,7 @@ export default function EditProfileScreen() {
         <View style={styles.countrySection}>
           <Text style={styles.label}>Country</Text>
           <TouchableOpacity style={styles.countryPicker} onPress={() => setShowCountryPicker(!showCountryPicker)}>
-            <Text style={styles.countryPickerText}>{currentCountryName} ({selectedCountry})</Text>
+            <Text style={styles.countryPickerText}>{currentCountryName}</Text>
             <Text style={styles.countryPickerArrow}>{showCountryPicker ? '▲' : '▼'}</Text>
           </TouchableOpacity>
           {showCountryPicker && (
@@ -243,7 +243,7 @@ export default function EditProfileScreen() {
                   }}
                 >
                   <Text style={styles.countryListItemText}>
-                    {countryOption.name} ({countryOption.code})
+                    {countryOption.name}
                   </Text>
                 </TouchableOpacity>
               ))}

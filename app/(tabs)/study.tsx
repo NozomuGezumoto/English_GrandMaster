@@ -11,10 +11,9 @@ import { TOEIC_LEVELS, LEVEL_DISPLAY, getLevelRangeForToeic } from '../../lib/le
 import { getQuestionsForToeicBand } from '../../lib/study-questions';
 import { getListeningResponseQuestions, shuffleListeningChoices } from '../../lib/listening-response-questions';
 import { addStudyWrongListening, addStudyWrongDictation, getStudyWrongDictation, getStudyWrongListening, clearStudyWrongDictation, clearStudyWrongListening, type StudyWrongListeningEntry, type StudyWrongDictationEntry } from '../../lib/study-wrong-answers';
+import { addStudyTimeToday } from '../../lib/study-time-today';
 import { getWordsForToeicBand, getTotalWordCount, type DictationEntry } from '../../lib/dictation-vocab';
-import { getStudyCardCounts } from '../../lib/study-cards';
 import { ensureAudioModeForSpeech } from '../../lib/audio-mode';
-import { StudyCardsTopContent } from '../components/StudyCardsTopContent';
 import { COLORS } from '../../lib/theme';
 import * as Speech from 'expo-speech';
 
@@ -50,14 +49,6 @@ export default function StudyScreen() {
   const [listeningSubTab, setListeningSubTab] = useState<ListeningSubTab>('list');
   const [wrongListeningList, setWrongListeningList] = useState<StudyWrongListeningEntry[]>([]);
   const [listeningListQuestions, setListeningListQuestions] = useState<Question[]>([]);
-  const [studyCardsCounts, setStudyCardsCounts] = useState<{
-    total: number;
-    learning: number;
-    mastered: number;
-    archived: number;
-  } | null>(null);
-  const [studyCardsLoading, setStudyCardsLoading] = useState(false);
-
   useEffect(() => {
     if (activeTab !== 'listening_quiz' || listeningQuizStarted) return;
     getStudyWrongListening().then(setWrongListeningList);
@@ -108,15 +99,6 @@ export default function StudyScreen() {
     };
     loadAllQuestionsForLevel();
   }, [activeTab, choiceSubTab, listLevel]);
-
-  useEffect(() => {
-    if (activeTab !== 'cards') return;
-    setStudyCardsLoading(true);
-    getStudyCardCounts()
-      .then(setStudyCardsCounts)
-      .catch(() => setStudyCardsCounts({ total: 0, learning: 0, mastered: 0, archived: 0 }))
-      .finally(() => setStudyCardsLoading(false));
-  }, [activeTab]);
 
   useEffect(() => {
     if (!auth.currentUser) return;
@@ -271,10 +253,10 @@ export default function StudyScreen() {
           </Text>
         </TouchableOpacity>
         <TouchableOpacity
-          style={[styles.tab, activeTab === 'cards' && styles.tabActive]}
-          onPress={() => setActiveTab('cards')}
+          style={styles.tab}
+          onPress={() => router.push('/study-cards')}
         >
-          <Text style={[styles.tabText, activeTab === 'cards' && styles.tabTextActive]}>
+          <Text style={styles.tabText}>
             Flashcards
           </Text>
         </TouchableOpacity>
@@ -580,16 +562,6 @@ export default function StudyScreen() {
             )}
           </ScrollView>
         )
-      ) : activeTab === 'cards' ? (
-        <ScrollView style={styles.content} contentContainerStyle={{ paddingBottom: 24 }}>
-          <StudyCardsTopContent
-            counts={studyCardsCounts}
-            loading={studyCardsLoading}
-            onAdd={() => router.push('/study-cards')}
-            onReview={() => router.push('/study-cards')}
-            onList={() => router.push('/study-cards')}
-          />
-        </ScrollView>
       ) : (
         <DictationScreen />
       )}
@@ -1070,6 +1042,7 @@ function DictationScreen() {
   const lastWrongAudioAtRef = useRef<number>(0);
   const lastWordRef = useRef<string | null>(null);
   const wrongRecordedForWordRef = useRef<string | null>(null);
+  const wordShownAtRef = useRef<number>(0);
   const [wrongDictationList, setWrongDictationList] = useState<StudyWrongDictationEntry[]>([]);
 
   const totalWordCount = getTotalWordCount();
@@ -1121,6 +1094,7 @@ function DictationScreen() {
       setCurrentDefinition(entry.definition || '');
       setCurrentChoiceIndex(0);
       setCurrentWord(entry.word.toLowerCase());
+      wordShownAtRef.current = Date.now();
       setDisplayedChars('');
       displayedCharsRef.current = '';
       lastWrongAudioAtRef.current = 0;
@@ -1179,6 +1153,10 @@ function DictationScreen() {
       setIsComplete(false);
       await playWord(nextWord);
     } else {
+      const elapsedSec = Math.floor((Date.now() - wordShownAtRef.current) / 1000);
+      if (elapsedSec > 0) {
+        addStudyTimeToday('dictation', elapsedSec);
+      }
       try {
         const inc = httpsCallable(functions, 'incrementTodayDictation');
         await inc({});

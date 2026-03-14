@@ -113,6 +113,15 @@ export async function updateStudyDeck(
   await saveDecks(decks);
 }
 
+export async function deleteStudyDeck(deckId: string): Promise<void> {
+  const decks = await loadDecks();
+  const filtered = decks.filter((d) => d.id !== deckId);
+  if (filtered.length === decks.length) return; // not found
+  await saveDecks(filtered);
+  await AsyncStorage.removeItem(STORAGE_KEY_CARDS_PREFIX + deckId);
+  await AsyncStorage.removeItem(STORAGE_KEY_REVIEW_ORDER_PREFIX + deckId);
+}
+
 // --- Card CRUD ---
 
 export interface CreateStudyCardInput {
@@ -257,6 +266,35 @@ export async function updateStudyCard(
   await saveCards(deckId, cards);
 }
 
+export async function deleteStudyCard(deckId: string, cardId: string): Promise<void> {
+  const cards = await loadCards(deckId);
+  const filtered = cards.filter((c) => c.id !== cardId);
+  if (filtered.length === cards.length) return; // not found
+  await saveCards(deckId, filtered);
+}
+
+/** リストから復習開始時に、リストの表示順を復習に渡すための一時保存 */
+const STORAGE_KEY_REVIEW_ORDER_PREFIX = '@studyCards_reviewOrder_';
+
+export async function setReviewOrder(deckId: string, cardIds: string[]): Promise<void> {
+  await AsyncStorage.setItem(STORAGE_KEY_REVIEW_ORDER_PREFIX + deckId, JSON.stringify(cardIds));
+}
+
+export async function getReviewOrder(deckId: string): Promise<string[] | null> {
+  const raw = await AsyncStorage.getItem(STORAGE_KEY_REVIEW_ORDER_PREFIX + deckId);
+  if (!raw) return null;
+  try {
+    const arr = JSON.parse(raw);
+    return Array.isArray(arr) ? arr : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function clearReviewOrder(deckId: string): Promise<void> {
+  await AsyncStorage.removeItem(STORAGE_KEY_REVIEW_ORDER_PREFIX + deckId);
+}
+
 export async function updateStudyCardAfterReview(
   deckId: string,
   cardId: string,
@@ -372,4 +410,42 @@ export async function getStudyCardCounts(
   }
 
   return { total, learning, mastered, archived, byDeck };
+}
+
+/** 品詞デモ用テストデッキを作成（Review by part of speech の表示確認用） */
+const PARTS_OF_SPEECH_SAMPLES: { englishText: string; japaneseNote: string; expressionType: StudyCardExpressionType }[] = [
+  { englishText: 'accuracy', japaneseNote: '正確さ', expressionType: 'noun' },
+  { englishText: 'confidence', japaneseNote: '自信', expressionType: 'noun' },
+  { englishText: 'database', japaneseNote: 'データベース', expressionType: 'noun' },
+  { englishText: 'accelerate', japaneseNote: '加速する', expressionType: 'verb' },
+  { englishText: 'achieve', japaneseNote: '達成する', expressionType: 'verb' },
+  { englishText: 'allocate', japaneseNote: '割り当てる', expressionType: 'verb' },
+  { englishText: 'accurate', japaneseNote: '正確な', expressionType: 'adjective' },
+  { englishText: 'adequate', japaneseNote: '適切な', expressionType: 'adjective' },
+  { englishText: 'available', japaneseNote: '利用可能な', expressionType: 'adjective' },
+  { englishText: 'accurately', japaneseNote: '正確に', expressionType: 'adverb' },
+  { englishText: 'actually', japaneseNote: '実際に', expressionType: 'adverb' },
+  { englishText: 'already', japaneseNote: 'すでに', expressionType: 'adverb' },
+  { englishText: 'as a matter of fact', japaneseNote: '実際のところ', expressionType: 'phrase' },
+  { englishText: 'at the same time', japaneseNote: '同時に', expressionType: 'phrase' },
+  { englishText: 'in charge of', japaneseNote: '〜を担当して', expressionType: 'phrase' },
+  { englishText: 'break the ice', japaneseNote: '場を和ませる', expressionType: 'idiom' },
+  { englishText: 'hit the books', japaneseNote: '勉強する', expressionType: 'idiom' },
+  { englishText: 'piece of cake', japaneseNote: '簡単なこと', expressionType: 'idiom' },
+  { englishText: 'would rather', japaneseNote: '〜したい（比較）', expressionType: 'grammar' },
+  { englishText: 'used to', japaneseNote: '以前は〜だった', expressionType: 'grammar' },
+  { englishText: 'Could you repeat that?', japaneseNote: 'もう一度言ってくれますか', expressionType: 'sentence' },
+  { englishText: "I'd be happy to help.", japaneseNote: '喜んでお手伝いします', expressionType: 'sentence' },
+  { englishText: 'etc.', japaneseNote: 'など', expressionType: 'other' },
+  { englishText: 'e.g.', japaneseNote: '例えば', expressionType: 'other' },
+];
+
+export async function seedPartsOfSpeechDemoDeck(): Promise<void> {
+  const deck = await createStudyDeck('Parts of Speech Demo');
+  const items = PARTS_OF_SPEECH_SAMPLES.map(({ englishText, japaneseNote, expressionType }) => ({
+    englishText,
+    japaneseNote,
+    expressionType,
+  }));
+  await createStudyCardsBulk(deck.id, items);
 }

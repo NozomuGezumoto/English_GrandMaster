@@ -2,7 +2,7 @@ import { initializeApp, getApps, getApp, FirebaseApp } from "firebase/app";
 import { getFirestore, Firestore, connectFirestoreEmulator } from "firebase/firestore";
 import { getAuth, Auth, connectAuthEmulator } from "firebase/auth";
 import { getFunctions, Functions, httpsCallable, connectFunctionsEmulator } from "firebase/functions";
-import { getStorage, Storage, ref, uploadBytes, getDownloadURL, connectStorageEmulator } from "firebase/storage";
+import { getStorage, ref, uploadBytes, getDownloadURL, connectStorageEmulator } from "firebase/storage";
 import Constants from "expo-constants";
 
 // エミュレータポート（firebase.json と一致させること。変更時は docs/PORTS.md 参照）
@@ -25,7 +25,7 @@ const app: FirebaseApp = getApps().length === 0 ? initializeApp(firebaseConfig) 
 
 export const db: Firestore = getFirestore(app);
 export const auth: Auth = getAuth(app);
-export const storage: Storage = getStorage(app);
+export const storage = getStorage(app);
 
 // ローカルエミュレータを使用する場合（開発環境）
 // 参照元: Constants.expoConfig?.extra?.useEmulator（app.config.js で EXPO_PUBLIC_USE_EMULATOR === 'true' のとき true）

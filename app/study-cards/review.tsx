@@ -7,11 +7,13 @@ import { View, Text, StyleSheet, TouchableOpacity, ScrollView, ActivityIndicator
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import { useEffect, useState, useRef } from 'react';
-import { getStudyCards, getStudyCardsByExpressionType, updateStudyCardAfterReview } from '../../lib/study-cards';
+import { getStudyCards, getStudyCardsByExpressionType, updateStudyCardAfterReview, getReviewOrder, clearReviewOrder } from '../../lib/study-cards';
 import { recordStudyReview } from '../../lib/study-reviews-today';
+import { addStudyTimeToday } from '../../lib/study-time-today';
 import { ensureAudioModeForSpeech } from '../../lib/audio-mode';
 import * as Speech from 'expo-speech';
 import type { StudyCard, StudyCardReviewDirection, StudyCardStatus } from '../../types/study-card';
+import { STATUS_LABELS } from '../../types/study-card';
 import { COLORS } from '../../lib/theme';
 
 const DIRECTION_LABELS: Record<StudyCardReviewDirection, string> = {
@@ -22,14 +24,16 @@ const DIRECTION_LABELS: Record<StudyCardReviewDirection, string> = {
 export default function StudyCardsReviewScreen() {
   const insets = useSafeAreaInsets();
   const router = useRouter();
-  const { deckId, expressionType } = useLocalSearchParams<{ deckId?: string; expressionType?: string }>();
-  const [step, setStep] = useState<'select' | 'review'>('select');
+  const { deckId, expressionType, fromList } = useLocalSearchParams<{ deckId?: string; expressionType?: string; fromList?: string }>();
+  const [step, setStep] = useState<'statusSelect' | 'select' | 'review'>('statusSelect');
   const [direction, setDirection] = useState<StudyCardReviewDirection | null>(null);
+  const [allCards, setAllCards] = useState<StudyCard[]>([]);
   const [cards, setCards] = useState<StudyCard[]>([]);
   const [loading, setLoading] = useState(true);
   const [currentIndex, setCurrentIndex] = useState(0);
   const [showBack, setShowBack] = useState(false);
   const lastPlayedIdRef = useRef<string | null>(null);
+  const cardShownAtRef = useRef<number>(0);
 
   useEffect(() => {
     if (!deckId && !expressionType) {
@@ -39,23 +43,55 @@ export default function StudyCardsReviewScreen() {
     setLoading(true);
     const load = expressionType
       ? getStudyCardsByExpressionType(expressionType as import('../../types/study-card').StudyCardExpressionType, {
-          status: 'learning',
+          statuses: ['learning', 'mastered', 'archived'],
           orderByCreated: 'desc',
           limitCount: 500,
         })
       : deckId
-        ? getStudyCards(deckId, { status: 'learning', orderByCreated: 'desc', limitCount: 500 })
+        ? getStudyCards(deckId, { statuses: ['learning', 'mastered', 'archived'], orderByCreated: 'desc', limitCount: 500 })
         : Promise.resolve([]);
     load
-      .then((list) => {
-        setCards(list);
+      .then(async (list) => {
+        if (deckId && fromList === '1') {
+          const orderIds = await getReviewOrder(deckId);
+          await clearReviewOrder(deckId);
+          if (orderIds?.length) {
+            const byId = new Map(list.map((c) => [c.id, c]));
+            const ordered = orderIds.map((id) => byId.get(id)).filter(Boolean) as StudyCard[];
+            if (ordered.length > 0) {
+              setAllCards(ordered);
+              setCards(ordered);
+              setStep('select');
+              setLoading(false);
+              return;
+            }
+          }
+        }
+        setAllCards(list);
         setLoading(false);
       })
       .catch(() => {
-        setCards([]);
+        setAllCards([]);
         setLoading(false);
       });
-  }, [deckId, expressionType]);
+  }, [deckId, expressionType, fromList]);
+
+  const reviewCardId = step === 'review' && cards[currentIndex] ? cards[currentIndex].id : null;
+  useEffect(() => {
+    if (reviewCardId) {
+      cardShownAtRef.current = Date.now();
+    }
+  }, [reviewCardId]);
+
+  const countByStatus = (s: StudyCardStatus) => allCards.filter((c) => c.status === s).length;
+
+  const handleSelectStatus = (filter: StudyCardStatus | 'all') => {
+    const filtered =
+      filter === 'all' ? allCards : allCards.filter((c) => c.status === filter);
+    setCards(filtered);
+    setStep('select');
+    setDirection(null);
+  };
 
   const handleSelectDirection = (dir: StudyCardReviewDirection) => {
     setDirection(dir);
@@ -64,12 +100,21 @@ export default function StudyCardsReviewScreen() {
     setShowBack(false);
   };
 
-  const handleBack = () => {
-    setStep('select');
-    setDirection(null);
+  const handleBackFromDirection = () => {
+    if (fromList === '1') {
+      router.back();
+    } else {
+      setStep('statusSelect');
+      setDirection(null);
+    }
   };
 
-  if (step === 'select') {
+  if (step === 'statusSelect') {
+    const learningCount = countByStatus('learning');
+    const masteredCount = countByStatus('mastered');
+    const archivedCount = countByStatus('archived');
+    const totalCount = allCards.length;
+
     return (
       <View style={[styles.container, { paddingTop: insets.top + 16 }]}>
         <TouchableOpacity style={styles.backButton} onPress={() => router.back()}>
@@ -77,27 +122,67 @@ export default function StudyCardsReviewScreen() {
         </TouchableOpacity>
 
         <Text style={styles.title}>Review</Text>
-        <Text style={styles.subtitle}>Choose direction</Text>
+        <Text style={styles.subtitle}>Choose which cards to review</Text>
 
         {loading ? (
           <ActivityIndicator size="large" color={COLORS.gold} style={styles.loader} />
-        ) : cards.length === 0 ? (
+        ) : totalCount === 0 ? (
           <View style={styles.empty}>
-            <Text style={styles.emptyText}>No cards to review</Text>
-            <Text style={styles.emptySub}>Add cards with status &quot;Learning&quot;</Text>
+            <Text style={styles.emptyText}>No cards</Text>
+            <Text style={styles.emptySub}>Add cards to get started</Text>
           </View>
         ) : (
           <View style={styles.directionRow}>
             <TouchableOpacity
-              style={styles.directionCard}
-              onPress={() => handleSelectDirection('en_to_ja')}
+              style={[styles.directionCard, learningCount === 0 && styles.directionCardDisabled]}
+              onPress={() => learningCount > 0 && handleSelectStatus('learning')}
+              disabled={learningCount === 0}
             >
-              <Text style={styles.directionCardText}>{DIRECTION_LABELS.en_to_ja}</Text>
+              <Text style={styles.directionCardText}>{STATUS_LABELS.learning} ({learningCount})</Text>
             </TouchableOpacity>
             <TouchableOpacity
-              style={styles.directionCard}
-              onPress={() => handleSelectDirection('ja_to_en')}
+              style={[styles.directionCard, masteredCount === 0 && styles.directionCardDisabled]}
+              onPress={() => masteredCount > 0 && handleSelectStatus('mastered')}
+              disabled={masteredCount === 0}
             >
+              <Text style={styles.directionCardText}>{STATUS_LABELS.mastered} ({masteredCount})</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.directionCard, archivedCount === 0 && styles.directionCardDisabled]}
+              onPress={() => archivedCount > 0 && handleSelectStatus('archived')}
+              disabled={archivedCount === 0}
+            >
+              <Text style={styles.directionCardText}>{STATUS_LABELS.archived} ({archivedCount})</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.directionCard} onPress={() => handleSelectStatus('all')}>
+              <Text style={styles.directionCardText}>All ({totalCount})</Text>
+            </TouchableOpacity>
+          </View>
+        )}
+      </View>
+    );
+  }
+
+  if (step === 'select') {
+    return (
+      <View style={[styles.container, { paddingTop: insets.top + 16 }]}>
+        <TouchableOpacity style={styles.backButton} onPress={handleBackFromDirection}>
+          <Text style={styles.backText}>← Back</Text>
+        </TouchableOpacity>
+
+        <Text style={styles.title}>Review</Text>
+        <Text style={styles.subtitle}>Choose direction</Text>
+
+        {cards.length === 0 ? (
+          <View style={styles.empty}>
+            <Text style={styles.emptyText}>No cards in this selection</Text>
+          </View>
+        ) : (
+          <View style={styles.directionRow}>
+            <TouchableOpacity style={styles.directionCard} onPress={() => handleSelectDirection('en_to_ja')}>
+              <Text style={styles.directionCardText}>{DIRECTION_LABELS.en_to_ja}</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.directionCard} onPress={() => handleSelectDirection('ja_to_en')}>
               <Text style={styles.directionCardText}>{DIRECTION_LABELS.ja_to_en}</Text>
             </TouchableOpacity>
           </View>
@@ -129,6 +214,13 @@ export default function StudyCardsReviewScreen() {
     );
   }
 
+  const recordCardTime = () => {
+    const elapsedSec = Math.floor((Date.now() - cardShownAtRef.current) / 1000);
+    if (elapsedSec > 0) {
+      addStudyTimeToday('flashcards', elapsedSec);
+    }
+  };
+
   return (
     <StudyReviewCard
       card={card}
@@ -137,14 +229,13 @@ export default function StudyCardsReviewScreen() {
       currentIndex={currentIndex}
       totalCount={cards.length}
       lastPlayedIdRef={lastPlayedIdRef}
-      onFlip={() => {
-        setShowBack(true);
-        recordStudyReview(card.englishText);
-      }}
+      onFlip={() => setShowBack(true)}
       onFlipBack={() => setShowBack(false)}
       onStatus={(status) => {
         const dId = deckId ?? card.deckId;
         if (!dId) return;
+        recordStudyReview(card.englishText);
+        recordCardTime();
         updateStudyCardAfterReview(dId, card.id, status).then(() => {
           setShowBack(false);
           setCurrentIndex((i) => i + 1);
@@ -152,6 +243,8 @@ export default function StudyCardsReviewScreen() {
       }}
       onBack={() => router.back()}
       onNext={() => {
+        recordStudyReview(card.englishText);
+        recordCardTime();
         setShowBack(false);
         setCurrentIndex((i) => i + 1);
       }}
@@ -188,9 +281,10 @@ function StudyReviewCard({
   const isEnToJa = direction === 'en_to_ja';
 
   // en_to_ja: 表面=英文→自動再生。裏面=日本語メモ
-  // ja_to_en: 表面=日本語メモ。裏面=英文
+  // ja_to_en: 表面=日本語メモ。裏面=英文→裏返したら自動再生
+  const englishIsShown = isEnToJa ? !showBack : showBack;
   useEffect(() => {
-    if (!showBack && isEnToJa && card.autoPlayAudio) {
+    if (englishIsShown && card.autoPlayAudio) {
       if (lastPlayedIdRef.current === card.id) return;
       lastPlayedIdRef.current = card.id;
       ensureAudioModeForSpeech().then(() => {
@@ -201,8 +295,8 @@ function StudyReviewCard({
         });
       });
     }
-    if (showBack) lastPlayedIdRef.current = null;
-  }, [card.id, card.englishText, showBack, isEnToJa, card.autoPlayAudio, lastPlayedIdRef]);
+    if (!englishIsShown) lastPlayedIdRef.current = null;
+  }, [card.id, card.englishText, englishIsShown, card.autoPlayAudio]);
 
   const frontText = isEnToJa ? card.englishText : card.japaneseNote || '(No note)';
   const backText = isEnToJa ? card.japaneseNote || '(No note)' : card.englishText;
@@ -262,7 +356,7 @@ function StudyReviewCard({
         </View>
       )}
 
-      {showBack && isEnToJa && (
+      {showBack && (
         <TouchableOpacity
           style={styles.playButton}
           onPress={() => {
@@ -331,6 +425,9 @@ const styles = StyleSheet.create({
     padding: 24,
     borderWidth: 1,
     borderColor: COLORS.border,
+  },
+  directionCardDisabled: {
+    opacity: 0.5,
   },
   directionCardText: {
     fontSize: 16,

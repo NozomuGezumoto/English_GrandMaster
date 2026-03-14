@@ -33,6 +33,7 @@ import { getListeningQuestionById, isListeningQuestionId, shuffleListeningChoice
 import { ensureAudioModeForSpeech, unlockAudioOnUserGesture, unlockAudioOnUserGestureAsync, unlockAudioOnUserGestureSync } from '../../lib/audio-mode';
 import { COLORS } from '../../lib/theme';
 import { playBattleSound } from '../../lib/battle-sound';
+import { addStudyTimeToday } from '../../lib/study-time-today';
 import { playClickSound, preloadClickSound } from '../../lib/click-sound';
 import { preloadWinSound } from '../../lib/win-sound';
 import * as Speech from 'expo-speech';
@@ -129,10 +130,13 @@ export default function MatchScreen() {
   const pendingFirstDictationLoadRef = useRef(false);
   /** AI対戦：モバイルでリスニング/ディクテーション時に「音声を有効化」をタップしたか（effect 再実行用） */
   const [aiSoundEnabledTrigger, setAiSoundEnabledTrigger] = useState(0);
+  /** 対戦の学習時間を記録済みの qIndex（1問1回だけ） */
+  const battleTimeRecordedForQIndexRef = useRef<Set<number>>(new Set());
 
   // GrandMaster: マッチが変わったらセグメント結果の dismiss 状態をリセット
   useEffect(() => {
     setDismissedPhaseResultAt(null);
+    battleTimeRecordedForQIndexRef.current = new Set();
   }, [id]);
 
   // Continue や「Play again」でクリック音を鳴らすため、マッチ画面でもプリロード
@@ -785,6 +789,12 @@ export default function MatchScreen() {
   const handleDictationSubmit = useCallback(async (textAnswer: string) => {
     if (!match || !auth.currentUser || answered) return;
     
+    const qIndex = match.currentQuestionIndex ?? 0;
+    if (!battleTimeRecordedForQIndexRef.current.has(qIndex)) {
+      battleTimeRecordedForQIndexRef.current.add(qIndex);
+      const elapsedSec = Math.floor((Date.now() - questionStartTimeRef.current) / 1000);
+      if (elapsedSec > 0) addStudyTimeToday('battle', elapsedSec);
+    }
     setAnswered(true);
     // 入力フィールドの表示は既にsetDictationInputで設定されているため、ここでは更新しない
     // ローカルで正解フラグは既に設定されているため、ここでは更新しない
@@ -834,7 +844,12 @@ export default function MatchScreen() {
     });
 
     // レスポンス到着時には match.currentQuestionIndex が進んでいる可能性があるので、回答した問題の qIndex を固定
-    const submittedQIndex = match.currentQuestionIndex;
+    const submittedQIndex = match.currentQuestionIndex ?? 0;
+    if (!battleTimeRecordedForQIndexRef.current.has(submittedQIndex)) {
+      battleTimeRecordedForQIndexRef.current.add(submittedQIndex);
+      const elapsedSec = Math.floor((Date.now() - questionStartTimeRef.current) / 1000);
+      if (elapsedSec > 0) addStudyTimeToday('battle', elapsedSec);
+    }
 
     // タイムアウトの場合（choiceIndex === -1）は無効な選択肢として処理
     const isTimeout = choiceIndex === -1;
