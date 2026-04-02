@@ -1,7 +1,7 @@
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity, ActivityIndicator, TextInput, Alert } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useRouter } from 'expo-router';
-import { useEffect, useState, useRef, type ReactElement } from 'react';
+import { useRouter, useFocusEffect } from 'expo-router';
+import { useEffect, useState, useRef, useCallback, type ReactElement } from 'react';
 import { collection, query, where, getDocs, orderBy, limit, doc, getDoc } from 'firebase/firestore';
 import { db, auth, functions, httpsCallable } from '../../lib/firebase';
 import { Match, Question } from '../../types/firestore';
@@ -13,6 +13,9 @@ import { getListeningResponseQuestions, shuffleListeningChoices } from '../../li
 import { addStudyWrongListening, addStudyWrongDictation, getStudyWrongDictation, getStudyWrongListening, clearStudyWrongDictation, clearStudyWrongListening, type StudyWrongListeningEntry, type StudyWrongDictationEntry } from '../../lib/study-wrong-answers';
 import { addStudyTimeToday } from '../../lib/study-time-today';
 import { getWordsForToeicBand, getTotalWordCount, type DictationEntry } from '../../lib/dictation-vocab';
+import { getStudyDecks, getStudyCards } from '../../lib/study-cards';
+import { studyCardsToDeckDictationEntries } from '../../lib/study-card-dictation';
+import type { StudyDeck } from '../../types/study-card';
 import { ensureAudioModeForSpeech } from '../../lib/audio-mode';
 import { COLORS } from '../../lib/theme';
 import * as Speech from 'expo-speech';
@@ -1022,10 +1025,22 @@ function ListeningQuizScreen({ level, onBack }: { level: ToeicLevel; onBack: () 
   );
 }
 
+type DictationWordSource = 'builtin' | 'deck';
+
 // ディクテーション画面コンポーネント
 function DictationScreen() {
+  const [dictationWordSource, setDictationWordSource] = useState<DictationWordSource>('builtin');
+  const [studyDecks, setStudyDecks] = useState<StudyDeck[]>([]);
+  const [selectedDeckId, setSelectedDeckId] = useState<string | null>(null);
+  const [deckListEntries, setDeckListEntries] = useState<DictationEntry[]>([]);
+
   const [selectedLevel, setSelectedLevel] = useState<ToeicLevel>(730);
   const [isStarted, setIsStarted] = useState(false);
+  const sessionSourceRef = useRef<DictationWordSource>('builtin');
+  const sessionDeckEntriesRef = useRef<DictationEntry[]>([]);
+  const sessionDeckIdRef = useRef<string | null>(null);
+  const sessionDeckNameRef = useRef<string>('');
+
   const [currentWord, setCurrentWord] = useState<string>('');
   const [currentChoiceWords, setCurrentChoiceWords] = useState<string[]>([]);
   const [currentChoiceIndex, setCurrentChoiceIndex] = useState(0);
@@ -1043,21 +1058,73 @@ function DictationScreen() {
   const lastWordRef = useRef<string | null>(null);
   const wrongRecordedForWordRef = useRef<string | null>(null);
   const wordShownAtRef = useRef<number>(0);
+  const wordForSpeechRef = useRef<string>('');
   const [wrongDictationList, setWrongDictationList] = useState<StudyWrongDictationEntry[]>([]);
+  const [autoAdvanceCountdown, setAutoAdvanceCountdown] = useState<number | null>(null);
+  const [stayHereForCurrent, setStayHereForCurrent] = useState(false);
+  const autoAdvanceIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const dictationNextRef = useRef<() => Promise<void>>(async () => {});
 
   const totalWordCount = getTotalWordCount();
 
+  const clearDictationAutoAdvance = useCallback(() => {
+    if (autoAdvanceIntervalRef.current) {
+      clearInterval(autoAdvanceIntervalRef.current);
+      autoAdvanceIntervalRef.current = null;
+    }
+    setAutoAdvanceCountdown(null);
+  }, []);
+
   const loadLevelWords = () => {
     setLevelWordsLoading(true);
-    const entries = getWordsForToeicBand(selectedLevel);
-    setLevelWordEntries(entries);
+    if (dictationWordSource === 'builtin') {
+      const entries = getWordsForToeicBand(selectedLevel);
+      setLevelWordEntries(entries);
+    } else {
+      setLevelWordEntries(deckListEntries);
+    }
     setLevelWordsLoading(false);
   };
 
+  useFocusEffect(
+    useCallback(() => {
+      if (isStarted) return;
+      getStudyDecks()
+        .then((decks) => {
+          setStudyDecks(decks);
+          setSelectedDeckId((prev) => {
+            if (prev && decks.some((d) => d.id === prev)) return prev;
+            return decks[0]?.id ?? null;
+          });
+        })
+        .catch(() => setStudyDecks([]));
+    }, [isStarted])
+  );
+
+  useEffect(() => {
+    if (isStarted || dictationWordSource !== 'deck' || !selectedDeckId) {
+      if (dictationWordSource === 'deck' && !selectedDeckId) setDeckListEntries([]);
+      return;
+    }
+    let cancelled = false;
+    getStudyCards(selectedDeckId, { limitCount: 2000 }).then((cards) => {
+      if (cancelled) return;
+      setDeckListEntries(studyCardsToDeckDictationEntries(cards));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [isStarted, dictationWordSource, selectedDeckId]);
+
   useEffect(() => {
     if (isStarted) return;
-    loadLevelWords();
-  }, [selectedLevel, isStarted]);
+    if (dictationWordSource === 'builtin') {
+      const entries = getWordsForToeicBand(selectedLevel);
+      setLevelWordEntries(entries);
+    } else {
+      setLevelWordEntries(deckListEntries);
+    }
+  }, [selectedLevel, isStarted, dictationWordSource, deckListEntries]);
 
   useEffect(() => {
     if (isStarted) return;
@@ -1065,9 +1132,19 @@ function DictationScreen() {
   }, [isStarted]);
 
   const loadRandomWord = async () => {
-    const entries = getWordsForToeicBand(selectedLevel);
+    const source = sessionSourceRef.current;
+    const entries: DictationEntry[] =
+      source === 'builtin' ? getWordsForToeicBand(selectedLevel) : sessionDeckEntriesRef.current;
+
     if (entries.length === 0) {
-      Alert.alert('No words', `No dictation words for this level (${LEVEL_DISPLAY[selectedLevel].label}). Run: node scripts/build-dictation-vocab.js`);
+      if (source === 'builtin') {
+        Alert.alert(
+          'No words',
+          `No dictation words for this level (${LEVEL_DISPLAY[selectedLevel].label}). Run: node scripts/build-dictation-vocab.js`
+        );
+      } else {
+        Alert.alert('No words', 'Add cards to this deck in Study Cards, then try again.');
+      }
       return;
     }
     try {
@@ -1081,6 +1158,7 @@ function DictationScreen() {
       lastWrongAudioAtRef.current = 0;
       setUserInput('');
       setIsComplete(false);
+      setStayHereForCurrent(false);
 
       let entry = entries[Math.floor(Math.random() * entries.length)];
       if (entries.length > 1 && lastWordRef.current !== null && entry.word === lastWordRef.current) {
@@ -1094,6 +1172,7 @@ function DictationScreen() {
       setCurrentDefinition(entry.definition || '');
       setCurrentChoiceIndex(0);
       setCurrentWord(entry.word.toLowerCase());
+      wordForSpeechRef.current = entry.word;
       wordShownAtRef.current = Date.now();
       setDisplayedChars('');
       displayedCharsRef.current = '';
@@ -1132,21 +1211,44 @@ function DictationScreen() {
 
   // ディクテーション開始
   const handleStart = async () => {
+    if (dictationWordSource === 'deck') {
+      if (!selectedDeckId) {
+        Alert.alert('Select a deck', 'Choose a study deck or add cards in Study Cards.');
+        return;
+      }
+      const cards = await getStudyCards(selectedDeckId, { limitCount: 2000 });
+      const entries = studyCardsToDeckDictationEntries(cards);
+      if (entries.length === 0) {
+        Alert.alert('No words', 'This deck has no cards yet. Add cards in Study Cards.');
+        return;
+      }
+      sessionSourceRef.current = 'deck';
+      sessionDeckEntriesRef.current = entries;
+      sessionDeckIdRef.current = selectedDeckId;
+      sessionDeckNameRef.current = studyDecks.find((d) => d.id === selectedDeckId)?.name ?? 'My deck';
+    } else {
+      sessionSourceRef.current = 'builtin';
+      sessionDeckEntriesRef.current = [];
+      sessionDeckIdRef.current = null;
+      sessionDeckNameRef.current = '';
+    }
     setIsStarted(true);
     await loadRandomWord();
-    // フォーカスを入力フィールドに設定
     setTimeout(() => {
       inputRef.current?.focus();
     }, 500);
   };
 
-  // 正解後「次へ」タップ or Enter で次の問題へ
+  // 正解後「次へ」タップ or Enter / 自動タイマー で次の問題へ
   const handleDictationNext = async () => {
+    clearDictationAutoAdvance();
+    setStayHereForCurrent(false);
     const nextIndex = currentChoiceIndex + 1;
     if (nextIndex < currentChoiceWords.length) {
       const nextWord = currentChoiceWords[nextIndex];
       setCurrentChoiceIndex(nextIndex);
       setCurrentWord(nextWord.toLowerCase());
+      wordForSpeechRef.current = nextWord;
       setDisplayedChars('');
       displayedCharsRef.current = '';
       setUserInput('');
@@ -1167,6 +1269,44 @@ function DictationScreen() {
     }
     setTimeout(() => inputRef.current?.focus(), 100);
   };
+
+  useEffect(() => {
+    dictationNextRef.current = handleDictationNext;
+  });
+
+  useEffect(() => {
+    if (!isStarted || !isComplete || stayHereForCurrent) {
+      if (autoAdvanceIntervalRef.current) {
+        clearInterval(autoAdvanceIntervalRef.current);
+        autoAdvanceIntervalRef.current = null;
+      }
+      setAutoAdvanceCountdown(null);
+      return;
+    }
+
+    let left = 3;
+    setAutoAdvanceCountdown(3);
+    const iv = setInterval(() => {
+      left -= 1;
+      if (left <= 0) {
+        clearInterval(iv);
+        autoAdvanceIntervalRef.current = null;
+        setAutoAdvanceCountdown(null);
+        void dictationNextRef.current();
+      } else {
+        setAutoAdvanceCountdown(left);
+      }
+    }, 1000);
+    autoAdvanceIntervalRef.current = iv;
+
+    return () => {
+      clearInterval(iv);
+      if (autoAdvanceIntervalRef.current === iv) {
+        autoAdvanceIntervalRef.current = null;
+      }
+      setAutoAdvanceCountdown(null);
+    };
+  }, [isStarted, isComplete, stayHereForCurrent]);
 
   // 入力変更時の処理（スペース対応: 最初からスペースを表示し、入力時に自動挿入）
   const handleInputChange = async (text: string) => {
@@ -1266,22 +1406,28 @@ function DictationScreen() {
       setUserInput(currentDisplayedChars);
       if (wrongRecordedForWordRef.current !== currentWord) {
         wrongRecordedForWordRef.current = currentWord;
-        addStudyWrongDictation({ word: currentWord, level: selectedLevel }).catch((e) => console.warn('[Study] save wrong dictation', e));
+        const payload =
+          sessionSourceRef.current === 'deck' && sessionDeckIdRef.current
+            ? {
+                word: currentWord,
+                level: 0,
+                deckId: sessionDeckIdRef.current,
+                deckName: sessionDeckNameRef.current,
+              }
+            : { word: currentWord, level: selectedLevel };
+        addStudyWrongDictation(payload).catch((e) => console.warn('[Study] save wrong dictation', e));
       }
-      // 間違えたときの音声再生（3秒クールダウン後なら再生、その後3秒休憩）
       const now = Date.now();
       if (now - lastWrongAudioAtRef.current >= 3000) {
         lastWrongAudioAtRef.current = now;
-        await playWord(currentWord);
+        await playWord(wordForSpeechRef.current || currentWord);
       }
     }
   };
 
-  // 再再生ボタン
   const handleReplay = async () => {
-    if (currentWord) {
-      await playWord(currentWord);
-    }
+    const t = wordForSpeechRef.current || currentWord;
+    if (t) await playWord(t);
   };
 
   if (!isStarted) {
@@ -1290,64 +1436,134 @@ function DictationScreen() {
         <ScrollView contentContainerStyle={dictationStyles.centerContainer}>
           <Text style={dictationStyles.title}>Dictation</Text>
           <Text style={dictationStyles.subtitle}>
-            Listen and type the word you hear
+            Listen and type what you hear
           </Text>
-          <Text style={dictationStyles.levelLabel}>Select difficulty (TOEIC · CEFR)</Text>
-          <View style={dictationStyles.levelGrid}>
-            <View style={dictationStyles.levelRow}>
-              {TOEIC_LEVELS.slice(0, 3).map((lv) => {
-                const { cefr, label } = LEVEL_DISPLAY[lv];
-                const isSelected = selectedLevel === lv;
-                return (
-                  <TouchableOpacity
-                    key={lv}
-                    style={[dictationStyles.levelCard, isSelected && dictationStyles.levelCardSelected]}
-                    onPress={() => setSelectedLevel(lv)}
-                    activeOpacity={0.8}
-                  >
-                    <View style={[dictationStyles.levelCardBadge, isSelected && dictationStyles.levelCardBadgeSelected]}>
-                      <Text style={[dictationStyles.levelCardCefr, isSelected && dictationStyles.levelCardCefrSelected]}>{cefr}</Text>
-                    </View>
-                    <Text style={[dictationStyles.levelCardLabel, isSelected && dictationStyles.levelCardLabelSelected]} numberOfLines={2}>
-                      {label}
-                    </Text>
-                    <Text style={[dictationStyles.levelCardToeic, isSelected && dictationStyles.levelCardToeicSelected]}>
-                      TOEIC {lv}
-                    </Text>
-                  </TouchableOpacity>
-                );
-              })}
-            </View>
-            <View style={[dictationStyles.levelRow, dictationStyles.levelRowSecond]}>
-              {TOEIC_LEVELS.slice(3, 5).map((lv) => {
-                const { cefr, label } = LEVEL_DISPLAY[lv];
-                const isSelected = selectedLevel === lv;
-                return (
-                  <TouchableOpacity
-                    key={lv}
-                    style={[dictationStyles.levelCard, isSelected && dictationStyles.levelCardSelected]}
-                    onPress={() => setSelectedLevel(lv)}
-                    activeOpacity={0.8}
-                  >
-                    <View style={[dictationStyles.levelCardBadge, isSelected && dictationStyles.levelCardBadgeSelected]}>
-                      <Text style={[dictationStyles.levelCardCefr, isSelected && dictationStyles.levelCardCefrSelected]}>{cefr}</Text>
-                    </View>
-                    <Text style={[dictationStyles.levelCardLabel, isSelected && dictationStyles.levelCardLabelSelected]} numberOfLines={2}>
-                      {label}
-                    </Text>
-                    <Text style={[dictationStyles.levelCardToeic, isSelected && dictationStyles.levelCardToeicSelected]}>
-                      TOEIC {lv}
-                    </Text>
-                  </TouchableOpacity>
-                );
-              })}
-            </View>
+
+          <Text style={dictationStyles.levelLabel}>Word source</Text>
+          <View style={dictationStyles.sourceRow}>
+            <TouchableOpacity
+              style={[dictationStyles.sourceChip, dictationWordSource === 'builtin' && dictationStyles.sourceChipSelected]}
+              onPress={() => setDictationWordSource('builtin')}
+              activeOpacity={0.85}
+            >
+              <Text
+                style={[dictationStyles.sourceChipText, dictationWordSource === 'builtin' && dictationStyles.sourceChipTextSelected]}
+                numberOfLines={2}
+              >
+                App vocabulary{'\n'}(TOEIC band)
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[dictationStyles.sourceChip, dictationWordSource === 'deck' && dictationStyles.sourceChipSelected]}
+              onPress={() => setDictationWordSource('deck')}
+              activeOpacity={0.85}
+            >
+              <Text
+                style={[dictationStyles.sourceChipText, dictationWordSource === 'deck' && dictationStyles.sourceChipTextSelected]}
+                numberOfLines={2}
+              >
+                My deck{'\n'}(Study Cards)
+              </Text>
+            </TouchableOpacity>
           </View>
+
+          {dictationWordSource === 'deck' ? (
+            <>
+              <Text style={dictationStyles.levelLabel}>Select deck</Text>
+              {studyDecks.length === 0 ? (
+                <Text style={[dictationStyles.subtitle, { marginBottom: 16 }]}>
+                  No decks yet. Open the Study Cards tab to create a deck and add cards.
+                </Text>
+              ) : (
+                <View style={dictationStyles.deckChipScroll}>
+                  {studyDecks.map((d) => {
+                    const isSel = selectedDeckId === d.id;
+                    return (
+                      <TouchableOpacity
+                        key={d.id}
+                        style={[dictationStyles.deckChip, isSel && dictationStyles.deckChipSelected]}
+                        onPress={() => setSelectedDeckId(d.id)}
+                        activeOpacity={0.85}
+                      >
+                        <Text
+                          style={[dictationStyles.deckChipTitle, isSel && dictationStyles.deckChipTitleSelected]}
+                          numberOfLines={2}
+                        >
+                          {d.name}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+              )}
+            </>
+          ) : (
+            <>
+              <Text style={dictationStyles.levelLabel}>Select difficulty (TOEIC · CEFR)</Text>
+              <View style={dictationStyles.levelGrid}>
+                <View style={dictationStyles.levelRow}>
+                  {TOEIC_LEVELS.slice(0, 3).map((lv) => {
+                    const { cefr, label } = LEVEL_DISPLAY[lv];
+                    const isSelected = selectedLevel === lv;
+                    return (
+                      <TouchableOpacity
+                        key={lv}
+                        style={[dictationStyles.levelCard, isSelected && dictationStyles.levelCardSelected]}
+                        onPress={() => setSelectedLevel(lv)}
+                        activeOpacity={0.8}
+                      >
+                        <View style={[dictationStyles.levelCardBadge, isSelected && dictationStyles.levelCardBadgeSelected]}>
+                          <Text style={[dictationStyles.levelCardCefr, isSelected && dictationStyles.levelCardCefrSelected]}>{cefr}</Text>
+                        </View>
+                        <Text style={[dictationStyles.levelCardLabel, isSelected && dictationStyles.levelCardLabelSelected]} numberOfLines={2}>
+                          {label}
+                        </Text>
+                        <Text style={[dictationStyles.levelCardToeic, isSelected && dictationStyles.levelCardToeicSelected]}>
+                          TOEIC {lv}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+                <View style={[dictationStyles.levelRow, dictationStyles.levelRowSecond]}>
+                  {TOEIC_LEVELS.slice(3, 5).map((lv) => {
+                    const { cefr, label } = LEVEL_DISPLAY[lv];
+                    const isSelected = selectedLevel === lv;
+                    return (
+                      <TouchableOpacity
+                        key={lv}
+                        style={[dictationStyles.levelCard, isSelected && dictationStyles.levelCardSelected]}
+                        onPress={() => setSelectedLevel(lv)}
+                        activeOpacity={0.8}
+                      >
+                        <View style={[dictationStyles.levelCardBadge, isSelected && dictationStyles.levelCardBadgeSelected]}>
+                          <Text style={[dictationStyles.levelCardCefr, isSelected && dictationStyles.levelCardCefrSelected]}>{cefr}</Text>
+                        </View>
+                        <Text style={[dictationStyles.levelCardLabel, isSelected && dictationStyles.levelCardLabelSelected]} numberOfLines={2}>
+                          {label}
+                        </Text>
+                        <Text style={[dictationStyles.levelCardToeic, isSelected && dictationStyles.levelCardToeicSelected]}>
+                          TOEIC {lv}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+              </View>
+            </>
+          )}
+
           <View style={dictationStyles.buttonRow}>
             <TouchableOpacity
-              style={dictationStyles.startButton}
+              style={[
+                dictationStyles.startButton,
+                (dictationWordSource === 'deck' && (!selectedDeckId || deckListEntries.length === 0)) && dictationStyles.startButtonDisabled,
+              ]}
               onPress={handleStart}
-              disabled={isLoading}
+              disabled={
+                isLoading ||
+                (dictationWordSource === 'deck' && (!selectedDeckId || deckListEntries.length === 0))
+              }
             >
               <Text style={dictationStyles.startButtonText}>
                 {isLoading ? 'Loading...' : 'Start dictation'}
@@ -1376,7 +1592,9 @@ function DictationScreen() {
                 {wrongDictationList.slice(0, 30).map((item, idx) => (
                   <View key={idx} style={styles.questionCardPlain}>
                     <Text style={styles.questionPrompt}>{item.word}</Text>
-                    <Text style={styles.sectionSubtitle}>Level {item.level}</Text>
+                    <Text style={styles.sectionSubtitle}>
+                      {item.deckId ? item.deckName ?? 'My deck' : `Level ${item.level}`}
+                    </Text>
                   </View>
                 ))}
               </ScrollView>
@@ -1392,20 +1610,28 @@ function DictationScreen() {
           {showWordList && (
             <View style={dictationStyles.wordListSection}>
               <Text style={dictationStyles.wordListTitle}>
-                Total {totalWordCount} words / This level {levelWordEntries.length} words
+                {dictationWordSource === 'builtin'
+                  ? `Total ${totalWordCount} words / This level ${levelWordEntries.length} words`
+                  : `This deck: ${levelWordEntries.length} cards`}
               </Text>
               {levelWordEntries.length === 0 ? (
                 <View style={dictationStyles.wordListEmptyBlock}>
-                  <Text style={dictationStyles.wordListEmpty}>No dictation words for this level</Text>
+                  <Text style={dictationStyles.wordListEmpty}>
+                    {dictationWordSource === 'builtin'
+                      ? 'No dictation words for this level'
+                      : 'No cards in this deck'}
+                  </Text>
                   <Text style={dictationStyles.wordListEmptyHint}>
-                    Run: node scripts/build-dictation-vocab.js to generate vocabulary
+                    {dictationWordSource === 'builtin'
+                      ? 'Run: node scripts/build-dictation-vocab.js to generate vocabulary'
+                      : 'Add cards in Study Cards'}
                   </Text>
                 </View>
               ) : (
                 <View style={dictationStyles.wordListRows}>
                   {levelWordEntries.map((entry, i) => (
                     <View key={`${entry.word}-${i}`} style={dictationStyles.wordListRow}>
-                      <Text style={dictationStyles.wordListRowText} numberOfLines={1}>{entry.word}</Text>
+                      <Text style={dictationStyles.wordListRowText} numberOfLines={2}>{entry.word}</Text>
                       {entry.definition ? (
                         <Text style={dictationStyles.wordListRowDefinition} numberOfLines={2}>{entry.definition}</Text>
                       ) : null}
@@ -1488,17 +1714,36 @@ function DictationScreen() {
             {currentDefinition ? (
               <Text style={dictationStyles.definitionText}>{currentDefinition}</Text>
             ) : null}
+            {autoAdvanceCountdown !== null ? (
+              <Text style={dictationStyles.autoAdvanceHint}>Next in {autoAdvanceCountdown}s…</Text>
+            ) : null}
+            {stayHereForCurrent ? (
+              <Text style={dictationStyles.autoAdvanceHint}>Staying here</Text>
+            ) : null}
           </View>
         )}
 
-        {/* 次の問題ボタン（正解後はタップ or Enter で次へ） */}
+        {/* 正解後のアクション */}
         {isComplete && (
-          <TouchableOpacity
-            style={dictationStyles.nextButton}
-            onPress={handleDictationNext}
-          >
-            <Text style={dictationStyles.nextButtonText}>Next word</Text>
-          </TouchableOpacity>
+          <View style={dictationStyles.postAnswerActionRow}>
+            <TouchableOpacity
+              style={[dictationStyles.nextButton, dictationStyles.postActionButton]}
+              onPress={handleDictationNext}
+            >
+              <Text style={dictationStyles.nextButtonText}>Next Now</Text>
+            </TouchableOpacity>
+            {!stayHereForCurrent ? (
+              <TouchableOpacity
+                style={[dictationStyles.nextButton, dictationStyles.postActionButton, dictationStyles.stayHereButton]}
+                onPress={() => {
+                  clearDictationAutoAdvance();
+                  setStayHereForCurrent(true);
+                }}
+              >
+                <Text style={dictationStyles.nextButtonText}>Stay here</Text>
+              </TouchableOpacity>
+            ) : null}
+          </View>
         )}
       </View>
     </View>
@@ -1536,6 +1781,75 @@ const dictationStyles = StyleSheet.create({
     color: COLORS.muted,
     marginBottom: 10,
     textAlign: 'center',
+  },
+  sourceRow: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    gap: 10,
+    width: '100%',
+    paddingHorizontal: 12,
+    marginBottom: 16,
+  },
+  sourceChip: {
+    flex: 1,
+    maxWidth: 200,
+    paddingVertical: 12,
+    paddingHorizontal: 10,
+    borderRadius: 12,
+    backgroundColor: COLORS.surface,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    alignItems: 'center',
+  },
+  sourceChipSelected: {
+    backgroundColor: COLORS.primary,
+    borderColor: COLORS.gold,
+  },
+  sourceChipText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: COLORS.text,
+    textAlign: 'center',
+    lineHeight: 17,
+  },
+  sourceChipTextSelected: {
+    color: COLORS.gold,
+  },
+  deckChipScroll: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 10,
+    width: '100%',
+    paddingHorizontal: 4,
+    paddingVertical: 4,
+    marginBottom: 12,
+  },
+  deckChip: {
+    width: 120,
+    minHeight: 48,
+    paddingVertical: 10,
+    paddingHorizontal: 10,
+    borderRadius: 12,
+    backgroundColor: COLORS.surface,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  deckChipSelected: {
+    backgroundColor: COLORS.primary,
+    borderColor: COLORS.gold,
+  },
+  deckChipTitle: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: COLORS.text,
+    textAlign: 'center',
+  },
+  deckChipTitleSelected: {
+    color: COLORS.gold,
   },
   levelGrid: {
     width: '100%',
@@ -1624,6 +1938,9 @@ const dictationStyles = StyleSheet.create({
     alignItems: 'center',
     borderWidth: 1,
     borderColor: COLORS.gold,
+  },
+  startButtonDisabled: {
+    opacity: 0.45,
   },
   startButtonText: {
     color: COLORS.gold,
@@ -1717,6 +2034,12 @@ const dictationStyles = StyleSheet.create({
     fontSize: 15,
     fontWeight: '600',
   },
+  autoAdvanceHint: {
+    marginTop: 10,
+    fontSize: 14,
+    color: COLORS.gold,
+    fontWeight: '600',
+  },
   displayArea: {
     backgroundColor: COLORS.surface,
     borderRadius: 12,
@@ -1768,6 +2091,11 @@ const dictationStyles = StyleSheet.create({
     paddingHorizontal: 24,
     fontStyle: 'italic',
   },
+  postAnswerActionRow: {
+    width: '100%',
+    flexDirection: 'row',
+    gap: 12,
+  },
   nextButton: {
     backgroundColor: COLORS.primary,
     paddingVertical: 16,
@@ -1776,6 +2104,13 @@ const dictationStyles = StyleSheet.create({
     alignItems: 'center',
     borderWidth: 1,
     borderColor: COLORS.gold,
+  },
+  postActionButton: {
+    flex: 1,
+  },
+  stayHereButton: {
+    backgroundColor: COLORS.surface,
+    borderColor: COLORS.border,
   },
   nextButtonText: {
     color: COLORS.gold,

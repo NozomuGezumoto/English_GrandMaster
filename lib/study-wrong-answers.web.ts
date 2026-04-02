@@ -13,6 +13,8 @@ export interface StudyWrongDictationEntry {
   word: string;
   level: number;
   wrongAt: number;
+  deckId?: string;
+  deckName?: string;
 }
 
 export interface StudyWrongListeningEntry {

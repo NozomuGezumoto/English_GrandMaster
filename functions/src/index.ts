@@ -19,6 +19,8 @@ type MatchMode = 'ai' | 'friend' | 'ranked';
 type MatchStatus = 'waiting' | 'playing' | 'finished' | 'aborted';
 /** ランクマの種別。総合のみ Grandmaster 称号あり */
 type RankedMode = 'choice' | 'dictation' | 'listening' | 'overall';
+/** 待機部屋の有効期限（これを超えた waiting は stale とみなして aborted 化） */
+const WAITING_MATCH_TTL_MS = 5 * 60 * 1000;
 
 // TOEICレベル（400, 600, 730, 860, 990）→ 問題の level 1-10 の範囲にマッピング
 function getLevelRange(toeicLevel: number): [number, number] {
@@ -1775,6 +1777,27 @@ export const findRankedMatch = functions.https.onCall(
           const matchData = matchDoc.data();
           const opponentUid = matchData.players?.A;
           if (!opponentUid || opponentUid === uid) return null;
+          const createdAtMs =
+            typeof matchData.createdAt?.toMillis === 'function' ? matchData.createdAt.toMillis() : 0;
+          if (createdAtMs > 0 && Date.now() - createdAtMs > WAITING_MATCH_TTL_MS) {
+            // stale 待機部屋はこの場で abort して再利用しない
+            await db.runTransaction(async (t) => {
+              const snap = await t.get(matchDoc.ref);
+              if (!snap.exists) return;
+              const d = snap.data()!;
+              if (d.status !== 'waiting') return;
+              t.update(matchDoc.ref, {
+                status: 'aborted',
+                abortedAt: Timestamp.now(),
+                abortReason: 'stale_waiting',
+              });
+            });
+            console.log('[findRankedMatch] Aborted stale waiting match', {
+              matchId: matchDoc.id,
+              ageMs: Date.now() - createdAtMs,
+            });
+            return null;
+          }
           const opponentRating = await getUserRating(opponentUid, questionType);
           if (opponentRating < minRating || opponentRating > maxRating) return null;
 
@@ -1910,6 +1933,53 @@ export const findRankedMatch = functions.https.onCall(
           `Failed to find ranked match: ${error.message || 'Unknown error'}`
         );
       }
+  }
+);
+
+/** 待機中・マッチ済み（開始前）の部屋を中断する。Cancel 時に呼ぶ */
+export const abortMatch = functions.https.onCall(
+  async (data, context: functions.https.CallableContext) => {
+    if (!context.auth) {
+      throw new functions.https.HttpsError('unauthenticated', 'Authentication required');
+    }
+    const uid = context.auth.uid;
+    const matchId = data?.matchId;
+    if (typeof matchId !== 'string' || !matchId) {
+      throw new functions.https.HttpsError('invalid-argument', 'matchId is required');
+    }
+
+    const matchRef = db.collection('matches').doc(matchId);
+    const result = await db.runTransaction(async (t) => {
+      const snap = await t.get(matchRef);
+      if (!snap.exists) {
+        throw new functions.https.HttpsError('not-found', 'Match not found');
+      }
+      const d = snap.data()!;
+      const status = d.status as MatchStatus | 'matched';
+      if (status !== 'waiting' && status !== 'matched') {
+        console.log('[abortMatch] Skip: already started/closed', { matchId, status, uid });
+        return { aborted: false, reason: 'already_started_or_closed' };
+      }
+      const playerA = d.players?.A;
+      const playerB = d.players?.B;
+      if (uid !== playerA && uid !== playerB) {
+        throw new functions.https.HttpsError('permission-denied', 'You are not a player in this match');
+      }
+      t.update(matchRef, {
+        status: 'aborted',
+        abortedAt: Timestamp.now(),
+        abortedBy: uid,
+        abortReason: 'user_cancelled',
+      });
+      return {
+        aborted: true,
+        previousStatus: status,
+        readyA: d.readyA === true,
+        readyB: d.readyB === true,
+      };
+    });
+    console.log('[abortMatch] done', { matchId, uid, ...result });
+    return result;
   }
 );
 

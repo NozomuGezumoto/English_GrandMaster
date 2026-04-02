@@ -1,18 +1,34 @@
 /**
- * 高級路線：黒×濃紺×金の統一テーマ
- * Background / Surface / Primary / Text / Muted / Gold / Border
+ * Global competitive lobby theme.
+ * Dark navy base + restrained gold + pale cyan accents.
  */
 export const COLORS = {
-  background: '#121212',
-  surface: '#161616',
-  primary: '#1B263B',
-  primaryHover: '#24324B',
-  text: '#F5F5F5',
-  muted: '#A3A3A3',
+  // Base layers
+  background: '#070B12',
+  surface: '#101722',
+  primary: '#1E2D44',
+  primaryHover: '#243754',
+
+  // Text
+  text: '#F3F7FF',
+  muted: '#A4B0C4',
+
+  // Accents
   gold: '#C6A75E',
-  border: '#2A2A2A',
-  overlay: 'rgba(0, 0, 0, 0.7)',
-  // 正誤表示用（控えめに）
+  cyan: '#8FB6FF',
+
+  // Borders & overlays
+  border: '#2A3D5A',
+  overlay: 'rgba(3, 6, 12, 0.74)',
+
+  /** Tower boss / guardian cards — fully opaque to avoid grainy moiré over photos */
+  towerCardBack: '#0A101E',
+  towerMetaPanel: '#131D34',
+  towerCtaReady: '#1E2F4C',
+  towerCtaCleared: '#2A2316',
+  towerCtaLocked: '#121822',
+
+  // Feedback colors
   correct: '#4ADE80',
   incorrect: '#F87171',
 } as const;

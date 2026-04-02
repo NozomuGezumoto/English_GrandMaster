@@ -23,9 +23,10 @@ export default function TabLayout() {
           paddingTop: 1,
         },
         tabBarLabelStyle: {
-          fontSize: 15,
+          fontSize: 17,
           fontWeight: '600',
           marginBottom: 6,
+          fontFamily: Platform.select({ ios: 'Times New Roman', android: 'serif', default: 'Georgia' }),
         },
       }}
     >

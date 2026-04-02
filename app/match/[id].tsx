@@ -1,4 +1,19 @@
-import { View, Text, StyleSheet, TouchableOpacity, Alert, ActivityIndicator, TextInput, Image, ScrollView, Platform } from 'react-native';
+import {
+  View,
+  Text,
+  StyleSheet,
+  TouchableOpacity,
+  Pressable,
+  Alert,
+  ActivityIndicator,
+  TextInput,
+  Image,
+  ScrollView,
+  Platform,
+  Dimensions,
+  useWindowDimensions,
+  type ImageSourcePropType,
+} from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import { useEffect, useState, useRef, useCallback, type ReactElement } from 'react';
@@ -28,18 +43,31 @@ function getTimestampMillis(t: unknown): number {
 }
 
 import { normalizeQuestion, getCorrectWord } from '../../lib/question-utils';
+import { applyDictationMatchInputChange } from '../../lib/dictation-match-input';
 import { getQuestionById, isLocalQuestionId } from '../../lib/study-questions';
 import { getListeningQuestionById, isListeningQuestionId, shuffleListeningChoices, shuffleListeningChoicesWithSeed } from '../../lib/listening-response-questions';
 import { ensureAudioModeForSpeech, unlockAudioOnUserGesture, unlockAudioOnUserGestureAsync, unlockAudioOnUserGestureSync } from '../../lib/audio-mode';
 import { COLORS } from '../../lib/theme';
+import { AI_AVATAR_SOURCE } from '../../lib/ai-avatar';
 import { playBattleSound } from '../../lib/battle-sound';
 import { addStudyTimeToday } from '../../lib/study-time-today';
 import { playClickSound, preloadClickSound } from '../../lib/click-sound';
 import { preloadWinSound } from '../../lib/win-sound';
 import * as Speech from 'expo-speech';
+import { pickRandomAiBattleBackground } from '../../lib/battle-ai-backgrounds';
+import { pickRandomRankedBattleBackground } from '../../lib/battle-ranked-backgrounds';
+import { pickRandomFriendBattleBackground } from '../../lib/battle-friend-backgrounds';
+import { useMatchHeroBackgroundSetter } from './MatchHeroBackground';
 
-/** TTS phrase played when user checks "Enable sound" before listening. Change here to use a different cue (e.g. 'beep'). */
-const PHASE_RESULT_UNLOCK_SPEECH = 'Get ready';
+/** ホーム（battle）と同じ競技ロビー用タイポグラフィ */
+const FONT = {
+  display: Platform.select({ ios: 'Times New Roman', android: 'serif', default: 'Georgia' }),
+  body: Platform.select({ ios: 'Helvetica Neue', android: 'sans-serif', default: 'Inter, system-ui, sans-serif' }),
+  numeric: Platform.select({ ios: 'Menlo', android: 'monospace', default: 'ui-monospace, SFMono-Regular, Menlo, monospace' }),
+};
+
+/** 1 問あたりの制限時間（秒）。タイマー演出の正規化に使用 */
+const MATCH_QUESTION_TIME_SEC = 20;
 
 /** overall のときはインデックスから問題種別を算出。順序は 4択→リスニング→ディクテーション */
 function getEffectiveQuestionType(match: Match, qIndex: number): 'choice' | 'dictation' | 'listening' {
@@ -57,6 +85,7 @@ export default function MatchScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const insets = useSafeAreaInsets();
   const safeTop = 20 + insets.top;
+  const { width: layoutWindowWidth, height: layoutWindowHeight } = useWindowDimensions();
   const [match, setMatch] = useState<Match | null>(null);
   const [currentQuestion, setCurrentQuestion] = useState<Question | null>(null);
   const [selectedChoice, setSelectedChoice] = useState<number | null>(null);
@@ -105,6 +134,7 @@ export default function MatchScreen() {
   const phaseCountdownStartsAtRef = useRef<number>(0);
   /** セグメント結果で Continue 送信中（両者押すまでカウント開始しない） */
   const [phaseContinueSubmitting, setPhaseContinueSubmitting] = useState(false);
+  const [cancelSubmitting, setCancelSubmitting] = useState(false);
   /** いま表示中のフェーズ結果の dismissIndex（携帯で勝者画面を飛ばさないよう、フェーズが変わったら承認をリセット） */
   const lastPhaseResultDismissIndexRef = useRef<number>(-1);
   /** タイマー effect の依存を安定させるため（onSnapshot で match が変わるたびに effect が走ると PC でタイマーが進まない） */
@@ -112,8 +142,12 @@ export default function MatchScreen() {
   const handleDictationSubmitRef = useRef<((textAnswer: string) => Promise<void>) | null>(null);
   /** 相手画面を閉じたあと初回だけ問題をロードしたか（2問目以降は onSnapshot 側でロードする） */
   const firstQuestionLoadedRef = useRef(false);
-  /** リスニング/ディクテーションの音声を「画面切り替え後」に1回だけ再生するための qIndex */
-  const lastAudioPlayedForQIndexRef = useRef<number>(-1);
+  /** リスニング/ディクテーションの音声を「画面切り替え後」に1回だけ再生するためのキー（qIndex+本文） */
+  const lastAudioPlayedKeyRef = useRef<string>('');
+  /** いま画面に確定表示されている問題の音声キー（遅延再生の競合防止） */
+  const currentDisplayedAudioKeyRef = useRef<string>('');
+  /** 直近の音声再生セッション。新しい再生開始時に更新し、古いコールバックを無効化する */
+  const speechSessionRef = useRef<number>(0);
   /** いま表示中の currentQuestion がどの qIndex 用か（再生する問題の一致判定用） */
   const currentQuestionForIndexRef = useRef<number>(-1);
   /** 相手発見画面で battle.mp3 を1回だけ再生したか */
@@ -132,17 +166,61 @@ export default function MatchScreen() {
   const [aiSoundEnabledTrigger, setAiSoundEnabledTrigger] = useState(0);
   /** 対戦の学習時間を記録済みの qIndex（1問1回だけ） */
   const battleTimeRecordedForQIndexRef = useRef<Set<number>>(new Set());
+  /** aborted 通知を重複表示しない */
+  const abortedNotifiedRef = useRef(false);
+
+  const setMatchHeroBackground = useMatchHeroBackgroundSetter();
+  /** AI / ランクマ / フレンドごとにマッチ ID 単位で 1 回だけランダム背景 */
+  const matchHeroBgAppliedForIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    const setter = setMatchHeroBackground;
+    if (!setter) return;
+    const mid = typeof id === 'string' ? id : Array.isArray(id) ? id[0] : undefined;
+    const mode = match?.mode;
+    const useHero = mode === 'ai' || mode === 'ranked' || mode === 'friend';
+    if (!mid || !useHero) {
+      matchHeroBgAppliedForIdRef.current = null;
+      setter(undefined);
+      return;
+    }
+    if (matchHeroBgAppliedForIdRef.current !== mid) {
+      matchHeroBgAppliedForIdRef.current = mid;
+      const src =
+        mode === 'ai'
+          ? pickRandomAiBattleBackground()
+          : mode === 'ranked'
+            ? pickRandomRankedBattleBackground()
+            : pickRandomFriendBattleBackground();
+      setter(src);
+    }
+  }, [id, match?.id, match?.mode, setMatchHeroBackground]);
+
+  useEffect(() => {
+    const setter = setMatchHeroBackground;
+    return () => {
+      matchHeroBgAppliedForIdRef.current = null;
+      setter?.(undefined);
+    };
+  }, [setMatchHeroBackground]);
 
   // GrandMaster: マッチが変わったらセグメント結果の dismiss 状態をリセット
   useEffect(() => {
     setDismissedPhaseResultAt(null);
     battleTimeRecordedForQIndexRef.current = new Set();
+    abortedNotifiedRef.current = false;
   }, [id]);
 
   // Continue や「Play again」でクリック音を鳴らすため、マッチ画面でもプリロード
   useEffect(() => {
     if (id) preloadClickSound();
   }, [id]);
+
+  // 問題切替・画面遷移時は必ず既存のTTSを止め、古いコールバックを無効化
+  useEffect(() => {
+    speechSessionRef.current += 1;
+    Speech.stop();
+  }, [id, match?.status, match?.currentQuestionIndex]);
 
   // ゲーム開始・フェーズ切り替えのカウントダウン用：サーバー時刻基準で再描画
   useEffect(() => {
@@ -313,9 +391,16 @@ export default function MatchScreen() {
   const playDictationAudio = useCallback(async (word: string) => {
     if (isPlayingAudio) return;
     setIsPlayingAudio(true);
+    const sessionId = ++speechSessionRef.current;
+    Speech.stop();
     return new Promise<void>(async (resolve) => {
       try {
         await ensureAudioModeForSpeech();
+        if (sessionId !== speechSessionRef.current) {
+          setIsPlayingAudio(false);
+          resolve();
+          return;
+        }
         if (__DEV__ && Platform.OS === 'web') {
           const ss = typeof window !== 'undefined' ? (window as any).speechSynthesis : null;
           console.log('[Audio] Web playDictationAudio:', { word, speaking: ss?.speaking, pending: ss?.pending });
@@ -324,15 +409,18 @@ export default function MatchScreen() {
         Speech.speak(word, {
           language: 'en-US',
           onStart: () => {
+            if (sessionId !== speechSessionRef.current) return;
             startFired = true;
             if (__DEV__ && Platform.OS === 'web') console.log('[Audio] Web: dictation speak started');
           },
           onDone: () => {
+            if (sessionId !== speechSessionRef.current) return;
             setIsPlayingAudio(false);
             resolve();
             if (__DEV__ && Platform.OS === 'web') console.log('[Audio] Web: dictation speak done');
           },
           onError: (error) => {
+            if (sessionId !== speechSessionRef.current) return;
             console.error('[Dictation] Speech error:', error);
             setIsPlayingAudio(false);
             resolve();
@@ -436,7 +524,7 @@ export default function MatchScreen() {
     firstQuestionLoadedRef.current = false;
     setPhaseResultAcknowledgedAt(null);
     setPhaseResultAudioChecked(false);
-    lastAudioPlayedForQIndexRef.current = -1;
+    lastAudioPlayedKeyRef.current = '';
     currentQuestionForIndexRef.current = -1;
     audioAcknowledgedForMatchRef.current = false;
     battleSoundPlayedRef.current = false;
@@ -680,6 +768,20 @@ export default function MatchScreen() {
       // onSnapshotのコールバックで設定すると、タイマーのuseEffectの値が上書きされる可能性がある
 
       // 終了チェック
+      if (matchData.status === 'aborted') {
+        if (!abortedNotifiedRef.current) {
+          abortedNotifiedRef.current = true;
+          const abortedBy = (matchData as Match & { abortedBy?: string }).abortedBy;
+          const byMe = abortedBy != null && abortedBy === uid;
+          Alert.alert(
+            'Match cancelled',
+            byMe ? 'Match cancelled.' : 'Opponent cancelled the match.',
+            [{ text: 'OK', onPress: () => router.back() }]
+          );
+        }
+        setLoading(false);
+        return;
+      }
       if (matchData.status === 'finished') {
         const isWinner = matchData.winnerUid === uid;
         if (isWinner && (matchData.mode === 'ranked' || matchData.mode === 'ai' || matchData.mode === 'friend')) {
@@ -708,17 +810,45 @@ export default function MatchScreen() {
   // Play listening/dictation audio once after screen is ready. On mobile, only after user checked "Enable sound". Keep effect simple: ensureAudioMode then speak.
   // ランクマ・友達対戦では gameStartsAt のカウントダウンが終わってから再生する（countdownTick で再実行される）
   useEffect(() => {
+    if (!match || match.status !== 'playing' || !currentQuestion) {
+      currentDisplayedAudioKeyRef.current = '';
+      return;
+    }
+    const qIndex = match.currentQuestionIndex ?? 0;
+    const effectiveType = getEffectiveQuestionType(match, qIndex);
+    const listeningPrompt =
+      effectiveType === 'listening' && typeof currentQuestion.prompt === 'string'
+        ? currentQuestion.prompt.trim()
+        : '';
+    const dictationWord = effectiveType === 'dictation' ? getCorrectWord(currentQuestion) : '';
+    currentDisplayedAudioKeyRef.current = effectiveType === 'listening'
+      ? `listening:${qIndex}:${listeningPrompt}`
+      : `dictation:${qIndex}:${dictationWord}`;
+  }, [match?.status, match?.currentQuestionIndex, match?.questionType, match?.choiceCount, match?.listeningCount, currentQuestion]);
+
+  useEffect(() => {
+    let cancelled = false;
     if (!match || match.status !== 'playing' || !currentQuestion) return;
     const gameStartsAtMs = getTimestampMillis(match?.gameStartsAt);
     if (gameStartsAtMs > 0 && gameStartsAtMs > Date.now()) return; // カウントダウン中は再生しない
     const qIndex = match.currentQuestionIndex ?? 0;
     if (Platform.OS !== 'web' && !audioAcknowledgedForMatchRef.current) return;
     if (currentQuestionForIndexRef.current !== qIndex) return;
-    if (lastAudioPlayedForQIndexRef.current === qIndex) return;
 
     const choiceCount = match.choiceCount ?? 10;
     const listeningCount = match.listeningCount ?? 10;
     const effectiveType = getEffectiveQuestionType(match, qIndex);
+    const listeningPrompt =
+      effectiveType === 'listening' && typeof currentQuestion.prompt === 'string'
+        ? currentQuestion.prompt.trim()
+        : '';
+    const dictationWord = effectiveType === 'dictation' ? getCorrectWord(currentQuestion) : '';
+    const audioKey = effectiveType === 'listening'
+      ? `listening:${qIndex}:${listeningPrompt}`
+      : `dictation:${qIndex}:${dictationWord}`;
+    if (lastAudioPlayedKeyRef.current === audioKey) return;
+    // 表示確定済みの問題と一致しない音声は再生しない（古い非同期処理の再生防止）
+    if (currentDisplayedAudioKeyRef.current !== audioKey) return;
 
     const isSegmentStartListening = match.questionType === 'overall' && qIndex === choiceCount;
     const isSegmentStartDictation = match.questionType === 'overall' && qIndex === choiceCount + listeningCount;
@@ -726,9 +856,8 @@ export default function MatchScreen() {
     const screenReadyForDictation = effectiveType === 'dictation' && (!isSegmentStartDictation || dismissedPhaseResultAt === choiceCount + listeningCount);
 
     if (screenReadyForListening && currentQuestion.prompt) {
-      const promptText = typeof currentQuestion.prompt === 'string' ? currentQuestion.prompt.trim() : '';
+      const promptText = listeningPrompt;
       if (promptText) {
-        lastAudioPlayedForQIndexRef.current = qIndex;
         Speech.stop();
         if (__DEV__ && Platform.OS === 'web') {
           const ss = typeof window !== 'undefined' ? (window as any).speechSynthesis : null;
@@ -740,17 +869,32 @@ export default function MatchScreen() {
           });
         }
         ensureAudioModeForSpeech().then(() => {
+          if (cancelled) return;
+          // 問題が差し替わった後の遅延再生を防ぐ
+          if (currentQuestionForIndexRef.current !== qIndex) return;
+          if (currentDisplayedAudioKeyRef.current !== audioKey) return;
+          if (lastAudioPlayedKeyRef.current === audioKey) return;
+          const sessionId = ++speechSessionRef.current;
+          lastAudioPlayedKeyRef.current = audioKey;
           let startFired = false;
+          Speech.stop();
+          console.log('[Audio][auto][listening] speak start', { qIndex, audioKey, promptLength: promptText.length });
           Speech.speak(promptText, {
             language: 'en-US',
             onStart: () => {
+              if (sessionId !== speechSessionRef.current) return;
               startFired = true;
+              console.log('[Audio][auto][listening] onStart', { qIndex, audioKey });
               if (__DEV__ && Platform.OS === 'web') console.log('[Audio] Web: listening speak started');
             },
             onError: (e) => {
+              if (sessionId !== speechSessionRef.current) return;
+              console.warn('[Audio][auto][listening] onError', { qIndex, audioKey, error: e });
               if (__DEV__ && Platform.OS === 'web') console.warn('[Audio] Web Speech.speak error:', e);
             },
             onDone: () => {
+              if (sessionId !== speechSessionRef.current) return;
+              console.log('[Audio][auto][listening] onDone', { qIndex, audioKey });
               if (__DEV__ && Platform.OS === 'web') console.log('[Audio] Web: listening speak done');
             },
           });
@@ -766,9 +910,13 @@ export default function MatchScreen() {
       return;
     }
     if (screenReadyForDictation) {
-      const correctWord = getCorrectWord(currentQuestion);
+      const correctWord = dictationWord;
       if (correctWord) {
-        lastAudioPlayedForQIndexRef.current = qIndex;
+        if (cancelled) return;
+        if (currentQuestionForIndexRef.current !== qIndex) return;
+        if (currentDisplayedAudioKeyRef.current !== audioKey) return;
+        if (lastAudioPlayedKeyRef.current === audioKey) return;
+        lastAudioPlayedKeyRef.current = audioKey;
         if (__DEV__ && Platform.OS === 'web') {
           const ss = typeof window !== 'undefined' ? (window as any).speechSynthesis : null;
           console.log('[Audio] Web: attempting Speech.speak for dictation', {
@@ -778,11 +926,17 @@ export default function MatchScreen() {
             speechSynthesisPending: ss?.pending,
           });
         }
+        console.log('[Audio][auto][dictation] speak start', { qIndex, audioKey, wordLength: correctWord.length });
         playDictationAudio(correctWord).then(() => {
+          if (cancelled) return;
+          console.log('[Audio][auto][dictation] speak done', { qIndex, audioKey });
           setTimeout(() => dictationInputRef.current?.focus(), 500);
         });
       }
     }
+    return () => {
+      cancelled = true;
+    };
   }, [match?.status, match?.currentQuestionIndex, match?.gameStartsAt, match?.questionType, match?.choiceCount, match?.listeningCount, currentQuestion, dismissedPhaseResultAt, playDictationAudio, countdownTick, aiSoundEnabledTrigger]);
 
   // ディクテーション用の回答処理
@@ -991,179 +1145,44 @@ export default function MatchScreen() {
     return unsubscribe;
   }, [router]);
 
+  const handleCancelMatch = useCallback(async () => {
+    if (cancelSubmitting) return;
+    setCancelSubmitting(true);
+    try {
+      if (id && (match?.status === 'waiting' || match?.status === 'matched')) {
+        const abort = httpsCallable(functions, 'abortMatch');
+        const res = await abort({ matchId: id });
+        console.log('[Match] abortMatch success:', res.data);
+        router.back();
+        return;
+      }
+      router.back();
+    } catch (e) {
+      console.warn('[Match] abortMatch warning:', e);
+      Alert.alert('Cancel failed', 'Failed to cancel match. Please try again.');
+      setCancelSubmitting(false);
+    }
+  }, [cancelSubmitting, id, match?.status, router]);
+
   // ディクテーション用の入力処理（useCallbackでメモ化して実機での動作を安定化）
   // フックの順序を保つため、早期リターンの前に配置
-  const handleDictationInputChange = useCallback((text: string) => {
-    if (!currentQuestion || answered) return;
-    
-    // 入力からスペースを除去（ユーザーが入力した文字のみを取得）
-    const textWithoutSpaces = text.replace(/\s/g, '').toLowerCase();
-    const correctWord = getCorrectWord(currentQuestion).toLowerCase();
-    const correctWordWithoutSpaces = correctWord.replace(/\s/g, '');
-    
-    // 表示済み文字からスペースを除去して比較（refから最新の値を取得して実機での状態同期を確実にする）
-    const currentDisplayedChars = displayedCharsRef.current || '';
-    const displayedWithoutSpaces = currentDisplayedChars.replace(/\s/g, '');
-    const displayedLength = displayedWithoutSpaces.length;
-    
-    // 全ての文字を入力し終わったかチェック
-    if (textWithoutSpaces.length >= correctWordWithoutSpaces.length) {
-      // 全ての文字を入力し終わった場合、最終的な一致をチェック
-      // 最後の文字まで入力した時点で、正解の単語と一致していれば必ず正解として処理
-      if (textWithoutSpaces === correctWordWithoutSpaces) {
-        // 正解：正解の単語のスペース位置を考慮して表示文字を構築
-        let newDisplayed = '';
-        let correctIndex = 0;
-        for (let i = 0; i < correctWordWithoutSpaces.length; i++) {
-          // 正解の単語で次の文字の位置を探す（スペースをスキップ）
-          while (correctIndex < correctWord.length && correctWord[correctIndex] === ' ') {
-            newDisplayed += ' ';
-            correctIndex++;
-          }
-          if (correctIndex < correctWord.length) {
-            newDisplayed += correctWordWithoutSpaces[i];
-            correctIndex++;
-          }
-        }
-        // refも更新（実機での状態同期を確実にする）
-        displayedCharsRef.current = newDisplayed;
-        dictationInputStateRef.current = newDisplayed;
-        setDisplayedChars(newDisplayed);
-        setDictationInput(newDisplayed); // スペースを含む完全な文字列を設定
-        // ローカルで正解フラグを設定（バックエンドの回答を待たずに即座に「正解」を表示）
-        setIsDictationCorrectLocal(true);
-        // 正解として送信（スペースを含む完全な文字列を渡す。handleDictationSubmit内でスペースを除去して送信）
-        handleDictationSubmit(newDisplayed);
-        return;
-      } else {
-        // 全ての文字を入力したが一致しない場合、入力を続けられるようにする
-        // 不正解を表示せず、ユーザーが修正できるようにする
-        // 入力フィールドはそのままにして、表示も更新しない（正解になるまで待つ）
-        return;
-      }
-    }
-    
-    if (textWithoutSpaces.length < displayedLength) {
-      // 文字が削除された場合：正解の単語のスペース位置を考慮して表示文字を再構築
-      let newDisplayed = '';
-      let correctIndex = 0;
-      for (let i = 0; i < textWithoutSpaces.length; i++) {
-        // 正解の単語で次の文字の位置を探す（スペースをスキップ）
-        while (correctIndex < correctWord.length && correctWord[correctIndex] === ' ') {
-          newDisplayed += ' ';
-          correctIndex++;
-        }
-        if (correctIndex < correctWord.length) {
-          newDisplayed += textWithoutSpaces[i];
-          correctIndex++;
-        }
-      }
-      // refも更新（実機での状態同期を確実にする）
-      displayedCharsRef.current = newDisplayed;
-      dictationInputStateRef.current = newDisplayed;
-      setDictationInput(newDisplayed);
-      setDisplayedChars(newDisplayed);
-      return;
-    }
-    
-    const newInput = textWithoutSpaces.slice(displayedLength);
-    if (newInput.length === 0) {
-      return;
-    }
-    
-    // 新しい入力文字列を1文字ずつ処理（refから最新の値を取得）
-    const currentDisplayedWithoutSpaces = displayedCharsRef.current.replace(/\s/g, '');
-    let processedInput = currentDisplayedWithoutSpaces;
-    let newDisplayed = '';
-    let correctIndex = 0;
-    let processedLength = currentDisplayedWithoutSpaces.length;
-    
-    // 新しい入力文字を1文字ずつチェックして処理
-    for (let inputIdx = 0; inputIdx < newInput.length; inputIdx++) {
-      const nextInputChar = newInput[inputIdx];
-      const nextCorrectChar = correctWordWithoutSpaces[processedLength];
-      
-      if (nextInputChar === nextCorrectChar) {
-        // 正解の文字：正解の単語のスペース位置を考慮して追加
-        // まず、現在の位置までの文字列を構築（スペースを含む）
-        let tempDisplayed = '';
-        let tempCorrectIndex = 0;
-        const tempProcessedLength = processedLength + 1;
-        
-        for (let i = 0; i < tempProcessedLength; i++) {
-          // 正解の単語で次の文字の位置を探す（スペースをスキップ）
-          while (tempCorrectIndex < correctWord.length && correctWord[tempCorrectIndex] === ' ') {
-            tempDisplayed += ' ';
-            tempCorrectIndex++;
-          }
-          if (tempCorrectIndex < correctWord.length) {
-            if (i < processedLength) {
-              tempDisplayed += processedInput[i];
-            } else {
-              tempDisplayed += nextInputChar;
-            }
-            tempCorrectIndex++;
-          }
-        }
-        
-        // 今入力した文字の直後にスペースがあるかチェック
-        let charCount = 0;
-        for (let i = 0; i < correctWord.length; i++) {
-          if (correctWord[i] !== ' ') {
-            charCount++;
-            if (charCount === tempProcessedLength) {
-              // 今入力した文字の位置を確認
-              if (i + 1 < correctWord.length && correctWord[i + 1] === ' ') {
-                // 次の位置がスペースの場合、自動的にスペースを挿入
-                tempDisplayed += ' ';
-              }
-              break;
-            }
-          }
-        }
-        
-        newDisplayed = tempDisplayed;
-        processedInput += nextInputChar;
-        processedLength++;
-        
-        // 全ての文字を入力し終わったかチェック
-        if (processedLength === correctWordWithoutSpaces.length) {
-          // 最後の文字まで入力した時点で、正解の単語と一致していれば正解として送信
-          const finalDisplayedWithoutSpaces = newDisplayed.replace(/\s/g, '');
-          if (finalDisplayedWithoutSpaces === correctWordWithoutSpaces) {
-            // refも更新（実機での状態同期を確実にする）
-            displayedCharsRef.current = newDisplayed;
-            dictationInputStateRef.current = newDisplayed;
-            setDisplayedChars(newDisplayed);
-            setDictationInput(newDisplayed);
-            // ローカルで正解フラグを設定（バックエンドの回答を待たずに即座に「正解」を表示）
-            setIsDictationCorrectLocal(true);
-            // スペースを含む完全な文字列を渡す。handleDictationSubmit内でスペースを除去して送信
-            handleDictationSubmit(newDisplayed);
-            return;
-          }
-        }
-      } else {
-        // 間違った文字：音声再生（3秒クールダウン後なら再生、その後3秒休憩）
-        const now = Date.now();
-        if (now - lastWrongAudioAtRef.current >= 3000) {
-          lastWrongAudioAtRef.current = now;
-        const wordToPlay = getCorrectWord(currentQuestion);
-        if (wordToPlay) playDictationAudio(wordToPlay);
-        }
-        break;
-      }
-    }
-    
-    // 処理した分だけ更新
-    if (newDisplayed.length > 0) {
-      // refも更新（実機での状態同期を確実にする）
-      displayedCharsRef.current = newDisplayed;
-      dictationInputStateRef.current = newDisplayed;
-      setDisplayedChars(newDisplayed);
-      setDictationInput(newDisplayed);
-    }
-  }, [currentQuestion, answered, handleDictationSubmit, playDictationAudio]);
+  const handleDictationInputChange = useCallback(
+    (text: string) => {
+      if (!currentQuestion || answered) return;
+      applyDictationMatchInputChange(text, answered, {
+        correctWord: getCorrectWord(currentQuestion),
+        displayedCharsRef,
+        dictationInputStateRef,
+        lastWrongAudioAtRef,
+        setDisplayedChars,
+        setDictationInput,
+        setIsDictationCorrectLocal,
+        playDictationAudio,
+        onCorrectComplete: handleDictationSubmit,
+      });
+    },
+    [currentQuestion, answered, handleDictationSubmit, playDictationAudio]
+  );
 
   const handleNext = () => {
     // 次の問題への遷移は、match.currentQuestionIndexの更新を監視するuseEffectで自動的に行われる
@@ -1183,7 +1202,7 @@ export default function MatchScreen() {
     return (
       <View style={[styles.container, { paddingTop: safeTop }]}>
         <Text style={styles.loadingText}>Invalid match</Text>
-        <TouchableOpacity style={styles.nextButton} onPress={() => router.back()}>
+        <TouchableOpacity style={styles.nextButton} onPress={handleCancelMatch} disabled={cancelSubmitting}>
           <Text style={styles.nextButtonText}>Back</Text>
         </TouchableOpacity>
       </View>
@@ -1331,7 +1350,8 @@ export default function MatchScreen() {
               style={styles.phaseResultAudioCheckRow}
               onPress={() => {
                 if (phaseResultAudioChecked) return;
-                Speech.speak(PHASE_RESULT_UNLOCK_SPEECH, { language: 'en-US', rate: 1.0 });
+                unlockAudioOnUserGestureSync();
+                unlockAudioOnUserGestureAsync();
                 setPhaseResultAudioChecked(true);
                 audioAcknowledgedForMatchRef.current = true;
               }}
@@ -1368,7 +1388,7 @@ export default function MatchScreen() {
                   </TouchableOpacity>
                 )
               )}
-              <TouchableOpacity style={styles.gmMatchCancelButton} onPress={() => router.back()}>
+              <TouchableOpacity style={styles.gmMatchCancelButton} onPress={handleCancelMatch} disabled={cancelSubmitting}>
                 <Text style={styles.gmMatchCancelText}>Cancel</Text>
               </TouchableOpacity>
             </View>
@@ -1418,7 +1438,8 @@ export default function MatchScreen() {
             style={styles.phaseResultAudioCheckRow}
             onPress={() => {
               if (phaseResultAudioChecked) return;
-              Speech.speak(PHASE_RESULT_UNLOCK_SPEECH, { language: 'en-US', rate: 1.0 });
+              unlockAudioOnUserGestureSync();
+              unlockAudioOnUserGestureAsync();
               setPhaseResultAudioChecked(true);
               audioAcknowledgedForMatchRef.current = true;
             }}
@@ -1457,7 +1478,8 @@ export default function MatchScreen() {
             )}
             <TouchableOpacity
               style={styles.opponentFoundCancelButton}
-              onPress={() => router.back()}
+              onPress={handleCancelMatch}
+              disabled={cancelSubmitting}
             >
               <Text style={styles.opponentFoundCancelButtonText}>Cancel</Text>
             </TouchableOpacity>
@@ -1501,7 +1523,8 @@ export default function MatchScreen() {
           style={styles.countdownOverlay}
           activeOpacity={1}
           onPress={() => {
-            Speech.speak(PHASE_RESULT_UNLOCK_SPEECH, { language: 'en-US', rate: 1.0 });
+            unlockAudioOnUserGestureSync();
+            unlockAudioOnUserGestureAsync();
             audioAcknowledgedForMatchRef.current = true;
             setAiSoundEnabledTrigger((t) => t + 1);
           }}
@@ -1630,202 +1653,344 @@ export default function MatchScreen() {
     name: string,
     avatarUrl?: string,
     value: string | number = '',
-    isLeading?: boolean
+    isLeading?: boolean,
+    align: 'left' | 'right' = 'left',
+    avatarAsset?: ImageSourcePropType
   ) => (
-    <View style={styles.playerSide} key={uidKey}>
-      {avatarUrl ? (
+    <View style={[styles.playerSide, align === 'right' && styles.playerSideRight]} key={uidKey}>
+      {avatarAsset != null ? (
+        avatarAsset === AI_AVATAR_SOURCE ? (
+          <Image source={AI_AVATAR_SOURCE} style={styles.playerAvatar} resizeMode="cover" />
+        ) : (
+          <Image source={avatarAsset} style={styles.playerAvatar} resizeMode="cover" />
+        )
+      ) : avatarUrl ? (
         <Image source={{ uri: avatarUrl }} style={styles.playerAvatar} />
       ) : (
         <View style={[styles.playerAvatar, styles.playerAvatarPlaceholder]}>
           <Text style={styles.playerAvatarText}>{name.slice(0, 1)}</Text>
         </View>
       )}
-      <Text style={[styles.playerName, isLeading && styles.dictationScoreLeading]} numberOfLines={1}>
-        {name}
-      </Text>
-      {value !== '' && <Text style={[styles.playerValue, isLeading && styles.dictationScoreLeading]}>{value}</Text>}
+      <View style={[styles.playerMeta, align === 'right' && styles.playerMetaRight]}>
+        <Text style={[styles.playerName, isLeading && styles.dictationScoreLeading]} numberOfLines={1}>
+          {name}
+        </Text>
+        {value !== '' && <Text style={[styles.playerValue, isLeading && styles.dictationScoreLeading]}>{value}</Text>}
+      </View>
     </View>
   );
 
-  const effectiveType = match ? getEffectiveQuestionType(match, match.currentQuestionIndex ?? 0) : 'choice';
-  // ディクテーションモードのレンダリング
-  if (effectiveType === 'dictation') {
-    const correctWord = getCorrectWord(currentQuestion);
-    const userAnswer = match.answers?.[uid]?.[match.currentQuestionIndex];
-    const opponentAnswer = match.answers?.[opponentUid]?.[match.currentQuestionIndex];
-    const isDictationCorrect = isDictationCorrectLocal || (userAnswer?.isCorrect || false);
-    const myTotalScore = Number((match.scores?.[uid] ?? 0).toFixed(3));
-    const oppTotalScore = Number((match.scores?.[opponentUid] ?? 0).toFixed(3));
-    const myQuestionScore = userAnswer?.finalScore != null ? Number(userAnswer.finalScore.toFixed(3)) : null;
-    const oppQuestionScore = opponentAnswer?.finalScore != null ? Number(opponentAnswer.finalScore.toFixed(3)) : null;
-    const myDisplayName = myUser?.displayName ?? 'You';
-    const oppDisplayName = opponentUid === 'ai' ? 'AI' : (opponentUser?.displayName ?? 'Opponent');
-
+  const renderLifeHearts = (lives: number, total = 3, iconFontSize = 18) => {
+    const lh = Math.round(iconFontSize * 1.32);
     return (
-      <View style={[styles.container, { paddingTop: safeTop }]}>
-        {/* ヘッダー */}
-        <View style={styles.header}>
-          <Text style={styles.questionNumber}>
-            Question {match.currentQuestionIndex + 1} / {(match.questionIds?.length ?? 0)}
-          </Text>
-          <Text style={styles.timer}>{formatTime(timeRemaining)}</Text>
-        </View>
-        {/* ディクテーション: 自分 vs 相手（名前・アバター・スコア） */}
-        <View style={styles.dictationScoreRow}>
-          {renderPlayerSide(uid, myDisplayName, myUser?.avatarUrl, String(myTotalScore), myTotalScore >= oppTotalScore)}
-          <Text style={styles.dictationScoreVs}>—</Text>
-          {renderPlayerSide(opponentUid || 'opp', oppDisplayName, opponentUid !== 'ai' ? opponentUser?.avatarUrl : undefined, String(oppTotalScore), oppTotalScore > myTotalScore)}
-        </View>
-        {/* ライフ表示はディクテーションでは行わない（スコア制のため） */}
-
-        {/* 再再生ボタン */}
-        <TouchableOpacity
-          style={styles.replayButton}
-          onPress={() => playDictationAudio(correctWord)}
-          disabled={isPlayingAudio}
-        >
-          <Text style={styles.replayButtonText}>🔊 Play again</Text>
-        </TouchableOpacity>
-
-        {/* 表示エリア */}
-        <View style={styles.dictationDisplayArea}>
-          <Text style={styles.dictationDisplayText}>
-            {(() => {
-              // 正解の単語のスペース位置を考慮して表示
-              const correctWordLower = correctWord.toLowerCase();
-              const displayedWithoutSpaces = displayedChars.replace(/\s/g, '');
-              const correctWordWithoutSpaces = correctWordLower.replace(/\s/g, '');
-              let displayedIndex = 0;
-              const result: ReactElement[] = [];
-              
-              for (let i = 0; i < correctWordLower.length; i++) {
-                if (correctWordLower[i] === ' ') {
-                  // スペースの位置
-                  result.push(
-                    <Text key={i} style={styles.dictationPlaceholder}>
-                      {' '}
-                    </Text>
-                  );
-                } else {
-                  // 文字の位置
-                  if (displayedIndex < displayedWithoutSpaces.length) {
-                    // 既に入力済みの文字
-                    result.push(
-                      <Text key={i} style={styles.dictationDisplayChar}>
-                        {displayedWithoutSpaces[displayedIndex]}
-                      </Text>
-                    );
-                    displayedIndex++;
-                  } else {
-                    // まだ入力されていない文字
-                    result.push(
-                      <Text key={i} style={styles.dictationPlaceholder}>
-                        _
-                      </Text>
-                    );
-                  }
-                }
-              }
-              
-              return result;
-            })()}
-          </Text>
-        </View>
-
-        {/* 入力フィールド */}
-        <TextInput
-          ref={dictationInputRef}
-          style={styles.dictationInput}
-          value={dictationInput}
-          onChangeText={handleDictationInputChange}
-          placeholder="Type here"
-          autoCapitalize="none"
-          autoCorrect={false}
-          editable={!answered}
-        />
-
-        {/* 回答結果（今問のスコアも表示） */}
-        {answered && (
-          <View style={styles.dictationResult}>
-            <Text style={[styles.dictationResultText, isDictationCorrect && styles.dictationResultCorrect]}>
-              {isDictationCorrect ? '✓ Correct!' : '✗ Incorrect'}
+      <View style={[styles.heartsRow, { gap: Math.max(4, Math.round(iconFontSize * 0.26)) }]}>
+        {Array.from({ length: total }, (_, i) => {
+          const active = i < lives;
+          return (
+            <Text
+              key={i}
+              style={[
+                styles.heartIcon,
+                active ? styles.heartIconActive : styles.heartIconInactive,
+                { fontSize: iconFontSize, lineHeight: lh },
+              ]}
+            >
+              {active ? '♥' : '♡'}
             </Text>
-            {(myQuestionScore != null || oppQuestionScore != null) && (
-              <View style={styles.dictationQuestionScores}>
-                <Text style={styles.dictationQuestionScoresLabel}>This question score</Text>
-                <Text style={styles.dictationQuestionScoresValues}>
-                  {myDisplayName} {myQuestionScore ?? '—'}  :  {oppDisplayName} {oppQuestionScore ?? '—'}
-                </Text>
-              </View>
-            )}
-            <Text style={styles.dictationAnswerText}>
-              Correct: {correctWord}
-            </Text>
-            {userAnswer?.textAnswer && (
-              <Text style={styles.dictationAnswerText}>
-                {myDisplayName}'s answer: {userAnswer.textAnswer}
-              </Text>
-            )}
-          </View>
-        )}
-
-        {/* 次の問題ボタン */}
-        {answered && match.currentQuestionIndex < (match.questionIds?.length ?? 1) - 1 && (
-          <TouchableOpacity style={styles.nextButton} onPress={handleNext}>
-            <Text style={styles.nextButtonText}>Next question</Text>
-          </TouchableOpacity>
-        )}
+          );
+        })}
       </View>
     );
-  }
+  };
 
-  // 4択問題モードのレンダリング
+  const effectiveType = match ? getEffectiveQuestionType(match, match.currentQuestionIndex ?? 0) : 'choice';
+
   const myLife4 = match.lives?.[uid] ?? 3;
   const oppLife4 = match.lives?.[opponentUid] ?? 3;
 
+  const timerUrgent = timeRemaining <= 8 && timeRemaining > 0 && !answered;
+  const timerDrainFlex = Math.max(0, MATCH_QUESTION_TIME_SEC - timeRemaining);
+
+  /**
+   * 対戦ヘッダー：親幅（container の padding を除く）に追従。固定 px 幅は持たない。
+   * 円アイコンは表示領域の高さを基準にし、列幅（max 42%）と幅比率で上限をかける。
+   */
+  const headerContentWidth = Math.max(260, layoutWindowWidth - 28);
+  const matchHeaderViewportH = Math.max(280, layoutWindowHeight - safeTop - insets.bottom);
+  /** 携帯縦：4択が一画面に収まるようヘッダー・問題・選択肢を詰める */
+  const compactBattleLayout = layoutWindowHeight < 820 || layoutWindowWidth < 440;
+  const matchDuelAvatarMaxFromSlot = headerContentWidth * 0.42 * 0.86;
+  const avHFactor = compactBattleLayout ? 0.086 : 0.118;
+  const avMax = compactBattleLayout ? 128 : 196;
+  const avMin = compactBattleLayout ? 44 : 56;
+  const avWidthCap = compactBattleLayout ? 0.2 : 0.26;
+  const matchDuelAvatarPx = Math.round(
+    Math.min(
+      avMax,
+      Math.max(
+        avMin,
+        Math.min(matchHeaderViewportH * avHFactor, matchDuelAvatarMaxFromSlot, headerContentWidth * avWidthCap),
+      ),
+    ),
+  );
+  const matchVsVisualScale =
+    layoutWindowWidth < 340 ? 5.25 : layoutWindowWidth < 400 ? 6.25 : layoutWindowWidth < 520 ? 7.25 : 8.5;
+  const matchVsScaleEffective = matchVsVisualScale * (compactBattleLayout ? 0.72 : 1);
+  /** 携帯縦：問題カード内の flexGrow 中央寄せが余白を食い、選択肢が画面外＋はみ出し先が白背景になるのを防ぐ */
+  const matchScrollBottomPad =
+    Math.max(insets.bottom, 12) + (Platform.OS === 'web' ? 36 : 16) + (compactBattleLayout ? 12 : 0);
+  /** 未回答時は最小限にして A〜D を優先（回答後は解説で伸びる・ScrollView で閲覧可） */
+  const afterChoicesReserveH = compactBattleLayout ? 48 : 200;
+  const questionBlockMinH =
+    effectiveType === 'listening'
+      ? compactBattleLayout
+        ? 112
+        : 204
+      : effectiveType === 'dictation'
+        ? compactBattleLayout
+          ? 120
+          : 212
+        : compactBattleLayout
+          ? 124
+          : 220;
+  const matchDuelAvatarRound = {
+    width: matchDuelAvatarPx,
+    height: matchDuelAvatarPx,
+    borderRadius: matchDuelAvatarPx / 2,
+    backgroundColor: COLORS.border,
+  };
+  const matchDuelAvatarInitialFontSize = Math.max(compactBattleLayout ? 14 : 16, Math.round(matchDuelAvatarPx * 0.34));
+  const matchDuelNameFontSize = Math.max(compactBattleLayout ? 11 : 14, Math.round(matchDuelAvatarPx * 0.125));
+
+  const dictationCorrectWord = effectiveType === 'dictation' ? getCorrectWord(currentQuestion) : '';
+  const dictationUserAnswer =
+    effectiveType === 'dictation' ? match.answers?.[uid]?.[match.currentQuestionIndex] : undefined;
+  const dictationOppAnswer =
+    effectiveType === 'dictation' ? match.answers?.[opponentUid]?.[match.currentQuestionIndex] : undefined;
+  const isDictationCorrectResult =
+    effectiveType === 'dictation' && (isDictationCorrectLocal || (dictationUserAnswer?.isCorrect ?? false));
+  const dictationMyQScore =
+    effectiveType === 'dictation' && dictationUserAnswer?.finalScore != null
+      ? Number(dictationUserAnswer.finalScore.toFixed(3))
+      : null;
+  const dictationOppQScore =
+    effectiveType === 'dictation' && dictationOppAnswer?.finalScore != null
+      ? Number(dictationOppAnswer.finalScore.toFixed(3))
+      : null;
+
   return (
-    <View style={[styles.container, { paddingTop: safeTop }]}>
-      {/* ヘッダー */}
-      <View style={styles.header}>
-        <Text style={styles.questionNumber}>
-          Question {match.currentQuestionIndex + 1} / {(match.questionIds?.length ?? 0)}
-        </Text>
-        <Text style={styles.timer}>{formatTime(timeRemaining)}</Text>
-      </View>
-      {match.lives != null && match.questionType !== 'dictation' && (
-        <View style={styles.livesRow}>
-          <View style={styles.playerSide}>
-            {myUser?.avatarUrl ? (
-              <Image source={{ uri: myUser.avatarUrl }} style={styles.playerAvatarSmall} />
-            ) : (
-              <View style={[styles.playerAvatarSmall, styles.playerAvatarPlaceholder]}>
-                <Text style={styles.playerAvatarTextSmall}>{myName.slice(0, 1)}</Text>
+    <View style={[styles.container, { paddingTop: safeTop, paddingBottom: compactBattleLayout ? 8 : 20 }]}>
+      <ScrollView
+        style={styles.matchPlayingScroll}
+        contentContainerStyle={[styles.matchPlayingScrollContent, { paddingBottom: matchScrollBottomPad }]}
+        keyboardShouldPersistTaps="handled"
+        nestedScrollEnabled
+        showsVerticalScrollIndicator={Platform.OS !== 'web'}
+      >
+      <View style={[styles.duelStageColumn, compactBattleLayout && styles.duelStageColumnCompact]}>
+        {/* 1. アイコン帯：円の下に名前→ハート（VS 中央）— ディクテ含む全モード共通 */}
+        <View style={[styles.matchIconsPlaque, compactBattleLayout && styles.matchIconsPlaqueCompact]}>
+            <View style={styles.matchIconsRim}>
+              <View style={[styles.matchIconsFace, compactBattleLayout && styles.matchIconsFaceCompact]}>
+                <View style={styles.towerDuelistLeft}>
+                  <View style={[styles.towerDuelistStack, compactBattleLayout && styles.towerDuelistStackCompact]}>
+                    <View style={[styles.towerAvatarRingBlue, compactBattleLayout && styles.towerAvatarRingCompact]}>
+                      {myUser?.avatarUrl ? (
+                        <Image source={{ uri: myUser.avatarUrl }} style={[matchDuelAvatarRound]} resizeMode="cover" />
+                      ) : (
+                        <View style={[matchDuelAvatarRound, styles.playerAvatarPlaceholder]}>
+                          <Text style={[styles.playerAvatarTextSmall, { fontSize: matchDuelAvatarInitialFontSize }]}>
+                            {myName.slice(0, 1)}
+                          </Text>
+                        </View>
+                      )}
+                    </View>
+                    <View style={styles.towerDuelistNameUnder}>
+                      <Text
+                        style={[
+                          styles.towerDuelistName,
+                          styles.towerDuelistNameBelowAvatar,
+                          {
+                            fontSize: matchDuelNameFontSize,
+                            lineHeight: Math.round(matchDuelNameFontSize * 1.32),
+                          },
+                        ]}
+                        numberOfLines={2}
+                        ellipsizeMode="tail"
+                      >
+                        {myName}
+                      </Text>
+                    </View>
+                    {match.lives != null ? (
+                      <View style={styles.towerHeartsBelowName}>
+                        {renderLifeHearts(myLife4, 3, matchDuelNameFontSize)}
+                      </View>
+                    ) : null}
+                  </View>
+                </View>
+                <View style={styles.altarVsEmblem} pointerEvents="none">
+                  <View style={[styles.altarVsEmblemInner, { transform: [{ scale: matchVsScaleEffective }] }]}>
+                    <Text style={styles.altarVsEmblemText}>VS</Text>
+                  </View>
+                </View>
+                <View style={styles.towerDuelistRight}>
+                  <View style={[styles.towerDuelistStack, compactBattleLayout && styles.towerDuelistStackCompact]}>
+                    <View style={[styles.towerAvatarRingEmber, compactBattleLayout && styles.towerAvatarRingCompact]}>
+                      {opponentUid === 'ai' ? (
+                        <Image source={AI_AVATAR_SOURCE} style={[matchDuelAvatarRound]} resizeMode="cover" />
+                      ) : opponentUser?.avatarUrl ? (
+                        <Image
+                          source={{ uri: opponentUser.avatarUrl }}
+                          style={[matchDuelAvatarRound]}
+                          resizeMode="cover"
+                        />
+                      ) : (
+                        <View style={[matchDuelAvatarRound, styles.playerAvatarPlaceholder]}>
+                          <Text style={[styles.playerAvatarTextSmall, { fontSize: matchDuelAvatarInitialFontSize }]}>
+                            {oppName.slice(0, 1)}
+                          </Text>
+                        </View>
+                      )}
+                    </View>
+                    <View style={styles.towerDuelistNameUnder}>
+                      <Text
+                        style={[
+                          styles.towerDuelistName,
+                          styles.towerDuelistNameBelowAvatar,
+                          {
+                            fontSize: matchDuelNameFontSize,
+                            lineHeight: Math.round(matchDuelNameFontSize * 1.32),
+                          },
+                        ]}
+                        numberOfLines={2}
+                        ellipsizeMode="tail"
+                      >
+                        {oppName}
+                      </Text>
+                    </View>
+                    {match.lives != null ? (
+                      <View style={styles.towerHeartsBelowName}>
+                        {renderLifeHearts(oppLife4, 3, matchDuelNameFontSize)}
+                      </View>
+                    ) : null}
+                  </View>
+                </View>
               </View>
-            )}
-            <Text style={styles.livesText}>{myName} <Text style={styles.livesHeart}>{'♥'.repeat(myLife4)}</Text></Text>
+            </View>
           </View>
-          <View style={styles.playerSide}>
-            {opponentUid !== 'ai' && opponentUser?.avatarUrl ? (
-              <Image source={{ uri: opponentUser.avatarUrl }} style={styles.playerAvatarSmall} />
-            ) : (
-              <View style={[styles.playerAvatarSmall, styles.playerAvatarPlaceholder]}>
-                <Text style={styles.playerAvatarTextSmall}>{oppName.slice(0, 1)}</Text>
+
+        <View style={[styles.boardPanelWrap, compactBattleLayout && styles.boardPanelWrapCompact]}>
+          <View style={[styles.boardPanelOuter, compactBattleLayout && styles.boardPanelOuterCompact]}>
+            <View style={styles.boardPanelInner}>
+              <View
+                style={[
+                  styles.questionContainer,
+                  effectiveType === 'listening' && styles.questionContainerListening,
+                  effectiveType === 'dictation' && styles.questionContainerDictation,
+                  { minHeight: questionBlockMinH },
+                ]}
+              >
+                <View
+                  style={[styles.boardPanelRegisterLine, compactBattleLayout && styles.boardPanelRegisterLineCompact]}
+                  pointerEvents="none"
+                />
+                <View style={[styles.boardProgressCorner, compactBattleLayout && styles.boardProgressCornerCompact]} pointerEvents="none">
+                  <Text
+                    style={[styles.boardProgressValue, compactBattleLayout && styles.boardProgressValueCompact]}
+                    numberOfLines={1}
+                  >
+                    QUESTION {match.currentQuestionIndex + 1} / {(match.questionIds?.length ?? 0)}
+                  </Text>
+                </View>
+                <View style={[styles.battlefieldContent, compactBattleLayout && styles.battlefieldContentCompact]}>
+                  <View style={[styles.promptScrim, compactBattleLayout && styles.promptScrimCompact]}>
+                    {effectiveType === 'dictation' ? (
+                      <View style={styles.dictationInCardColumn}>
+                        {!!currentQuestion.prompt && (
+                          <Text style={styles.dictationInstructionText} numberOfLines={4}>
+                            {currentQuestion.prompt}
+                          </Text>
+                        )}
+                        <Text style={styles.dictationDisplayTextInCard}>
+                          {(() => {
+                            const correctWord = dictationCorrectWord;
+                            const correctWordLower = correctWord.toLowerCase();
+                            const displayedWithoutSpaces = displayedChars.replace(/\s/g, '');
+                            let displayedIndex = 0;
+                            const result: ReactElement[] = [];
+                            for (let i = 0; i < correctWordLower.length; i++) {
+                              if (correctWordLower[i] === ' ') {
+                                result.push(
+                                  <Text key={i} style={styles.dictationPlaceholderInCard}>
+                                    {' '}
+                                  </Text>,
+                                );
+                              } else if (displayedIndex < displayedWithoutSpaces.length) {
+                                result.push(
+                                  <Text key={i} style={styles.dictationDisplayCharInCard}>
+                                    {displayedWithoutSpaces[displayedIndex]}
+                                  </Text>,
+                                );
+                                displayedIndex++;
+                              } else {
+                                result.push(
+                                  <Text key={i} style={styles.dictationPlaceholderInCard}>
+                                    _
+                                  </Text>,
+                                );
+                              }
+                            }
+                            return result;
+                          })()}
+                        </Text>
+                      </View>
+                    ) : effectiveType === 'listening' && !answered ? (
+                      <Text style={[styles.promptListeningCue, compactBattleLayout && styles.promptListeningCueCompact]}>
+                        Listen and choose the best response.
+                      </Text>
+                    ) : (
+                      <Text
+                        style={[
+                          styles.prompt,
+                          !answered && styles.promptLive,
+                          compactBattleLayout && styles.promptCompact,
+                        ]}
+                        numberOfLines={6}
+                        ellipsizeMode="tail"
+                      >
+                        {currentQuestion.prompt ?? ''}
+                      </Text>
+                    )}
+                  </View>
+                </View>
               </View>
-            )}
-            <Text style={styles.livesText}>{oppName} <Text style={styles.livesHeart}>{'♥'.repeat(oppLife4)}</Text></Text>
+
+              <View style={[styles.boardTimeFooter, compactBattleLayout && styles.boardTimeFooterCompact]}>
+                <View style={[styles.boardTimeFooterHeader, compactBattleLayout && styles.boardTimeFooterHeaderCompact]}>
+                  <Text
+                    style={[
+                      styles.matchLimitBarTimer,
+                      compactBattleLayout && styles.matchLimitBarTimerCompact,
+                      timerUrgent && styles.altarHudTimerUrgent,
+                    ]}
+                  >
+                    {formatTime(timeRemaining)}
+                  </Text>
+                </View>
+                <View style={[styles.matchLimitBarTrack, compactBattleLayout && styles.matchLimitBarTrackCompact]} pointerEvents="none">
+                  <View
+                    style={[
+                      styles.matchLimitBarRemain,
+                      { flex: Math.max(0.001, timeRemaining) },
+                      timerUrgent && styles.matchLimitBarRemainUrgent,
+                    ]}
+                  />
+                  <View style={[styles.matchLimitBarSpent, { flex: Math.max(0.001, timerDrainFlex) }]} />
+                </View>
+              </View>
+            </View>
           </View>
         </View>
-      )}
-
-      {/* 問題文（リスニング時は高さ固定で回答前後・他端末の回答有無で選択肢がずれないようにする） */}
-      <View style={[styles.questionContainer, effectiveType === 'listening' && styles.questionContainerListening]}>
-        {effectiveType === 'listening' && !answered ? (
-          <Text style={styles.prompt}>Listen and choose the best response.</Text>
-        ) : (
-          <Text style={styles.prompt} numberOfLines={4} ellipsizeMode="tail">
-            {currentQuestion.prompt ?? ''}
-          </Text>
-        )}
       </View>
 
       {/* Listening: replay button. On mobile, tap plays click then TTS so audio is allowed. */}
@@ -1850,8 +2015,33 @@ export default function MatchScreen() {
         </TouchableOpacity>
       )}
 
-      {/* 選択肢 */}
-      <View style={styles.choicesContainer}>
+      {effectiveType === 'dictation' && !!dictationCorrectWord && (
+        <TouchableOpacity
+          style={styles.replayButton}
+          onPress={() => playDictationAudio(dictationCorrectWord)}
+          disabled={isPlayingAudio}
+        >
+          <Text style={styles.replayButtonText}>🔊 Play again</Text>
+        </TouchableOpacity>
+      )}
+
+      {effectiveType === 'dictation' && (
+        <TextInput
+          ref={dictationInputRef}
+          style={styles.dictationInputMatch}
+          value={dictationInput}
+          onChangeText={handleDictationInputChange}
+          placeholder="Type here"
+          placeholderTextColor="rgba(164, 176, 196, 0.55)"
+          autoCapitalize="none"
+          autoCorrect={false}
+          editable={!answered}
+        />
+      )}
+
+      {/* 選択肢（4択・リスニング） */}
+      {effectiveType !== 'dictation' && (
+      <View style={[styles.choicesContainer, compactBattleLayout && styles.choicesContainerCompact]}>
         {(Array.isArray(currentQuestion.choices) ? currentQuestion.choices : []).map((choice, index) => {
           const isSelected = selectedChoice === index;
           const showCorrect = answered && (
@@ -1862,36 +2052,112 @@ export default function MatchScreen() {
           const showIncorrect = answered && isSelected && hasDefinitiveWrong;
 
           return (
-            <TouchableOpacity
+            <Pressable
               key={index}
-              style={[
-                styles.choice,
-                isSelected && styles.choiceSelected,
+              disabled={answered}
+              onPress={() => handleAnswer(index, false)}
+              android_ripple={{ color: 'rgba(255,255,255,0.07)' }}
+              style={({ pressed }) => [
+                styles.altarCommandPlate,
+                compactBattleLayout && styles.altarCommandPlateCompact,
+                styles.choiceTowerStripe,
+                isSelected && !answered && styles.choiceSelectedLocked,
                 showCorrect && styles.choiceCorrect,
                 showIncorrect && styles.choiceIncorrect,
                 answered && !isSelected && styles.choiceDisabled,
+                pressed &&
+                  !answered &&
+                  (isSelected ? styles.choicePressedCommitted : styles.choicePressed),
               ]}
-              onPress={() => handleAnswer(index, false)}
-              disabled={answered}
             >
-              <Text
-                style={[
-                  styles.choiceText,
-                  isSelected && styles.choiceTextSelected,
-                  showCorrect && styles.choiceTextCorrect,
-                  showIncorrect && styles.choiceTextIncorrect,
-                ]}
-              >
-                {String.fromCharCode(65 + index)}. {choice}
-              </Text>
-            </TouchableOpacity>
+              <View style={[styles.altarCommandRow, compactBattleLayout && styles.altarCommandRowCompact]}>
+                <View
+                  style={[
+                    styles.altarCommandShield,
+                    compactBattleLayout && styles.altarCommandShieldCompact,
+                    styles.choiceBadgeLetter,
+                    isSelected && styles.choiceLetterBadgeSelected,
+                    showCorrect && styles.choiceLetterBadgeCorrect,
+                    showIncorrect && styles.choiceLetterBadgeIncorrect,
+                  ]}
+                >
+                  <Text
+                    style={[
+                      styles.choiceLetter,
+                      compactBattleLayout && styles.choiceLetterCompact,
+                      isSelected && styles.choiceTextSelected,
+                      showCorrect && styles.choiceTextCorrect,
+                      showIncorrect && styles.choiceTextIncorrect,
+                    ]}
+                  >
+                    {String.fromCharCode(65 + index)}
+                  </Text>
+                </View>
+                <View style={[styles.altarCommandBody, compactBattleLayout && styles.altarCommandBodyCompact]}>
+                  <Text
+                    style={[
+                      styles.choiceText,
+                      compactBattleLayout && styles.choiceTextCompact,
+                      isSelected && styles.choiceTextSelected,
+                      showCorrect && styles.choiceTextCorrect,
+                      showIncorrect && styles.choiceTextIncorrect,
+                    ]}
+                  >
+                    {choice}
+                  </Text>
+                </View>
+              </View>
+            </Pressable>
           );
         })}
       </View>
+      )}
 
       {/* 解説・次へボタン用のスペースを常に同じ高さで確保し、先に回答した端末に依存せず選択肢の位置を固定 */}
-      <View style={styles.afterChoicesArea}>
-        {answered && (
+      <View style={[styles.afterChoicesArea, { height: afterChoicesReserveH }]}>
+        {answered && effectiveType === 'dictation' && (
+          <>
+            <View style={[styles.explanationContainer, styles.dictationResultMatch]}>
+              <Text
+                style={[
+                  styles.explanationLabel,
+                  isDictationCorrectResult && styles.dictationResultCorrectLabel,
+                  !isDictationCorrectResult && hasDefinitiveWrong && styles.dictationResultIncorrectLabel,
+                ]}
+              >
+                {isDictationCorrectResult ? '✓ Correct!' : hasDefinitiveWrong ? '✗ Incorrect' : '...'}
+              </Text>
+              {(dictationMyQScore != null || dictationOppQScore != null) && (
+                <View style={styles.dictationQuestionScores}>
+                  <Text style={styles.dictationQuestionScoresLabel}>Round scores</Text>
+                  <Text style={styles.dictationQuestionScoresValues}>
+                    {myName}: {dictationMyQScore != null ? dictationMyQScore : '—'} · {oppName}:{' '}
+                    {dictationOppQScore != null ? dictationOppQScore : '—'}
+                  </Text>
+                </View>
+              )}
+              <ScrollView style={styles.explanationScroll} nestedScrollEnabled showsVerticalScrollIndicator={false}>
+                <Text style={styles.explanation}>
+                  <Text style={styles.dictationResultAnswerLead}>Answer: </Text>
+                  {dictationCorrectWord}
+                </Text>
+                {!!dictationUserAnswer?.textAnswer && (
+                  <Text style={styles.dictationAnswerText}>
+                    {myName}
+                    {"'s answer: "}
+                    {dictationUserAnswer.textAnswer}
+                  </Text>
+                )}
+              </ScrollView>
+            </View>
+            {match.currentQuestionIndex < (match.questionIds?.length ?? 1) - 1 && (
+              <TouchableOpacity style={styles.nextButton} onPress={handleNext}>
+                <Text style={styles.nextButtonText}>Next question</Text>
+              </TouchableOpacity>
+            )}
+          </>
+        )}
+        {answered && effectiveType !== 'dictation' && (
           <>
             <View style={styles.explanationContainer}>
               <Text style={styles.explanationLabel}>
@@ -1909,6 +2175,7 @@ export default function MatchScreen() {
           </>
         )}
       </View>
+      </ScrollView>
     </View>
   );
 }
@@ -1916,8 +2183,332 @@ export default function MatchScreen() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: COLORS.background,
-    padding: 20,
+    backgroundColor: 'transparent',
+    paddingHorizontal: 14,
+    paddingTop: 12,
+    paddingBottom: 20,
+    position: 'relative',
+    minWidth: 0,
+    maxWidth: '100%',
+  },
+  /** モバイル Web：縦はみ出しで半透明ボタンが body の白に乗るのを防ぐ（中でスクロール） */
+  matchPlayingScroll: {
+    flex: 1,
+    width: '100%',
+    maxWidth: '100%',
+    minWidth: 0,
+    backgroundColor: 'transparent',
+  },
+  matchPlayingScrollContent: {
+    flexGrow: 1,
+    width: '100%',
+    maxWidth: '100%',
+    minWidth: 0,
+  },
+  /** メイン列（choice / listening） */
+  duelStageColumn: {
+    zIndex: 1,
+    marginBottom: 8,
+    width: '100%',
+    alignSelf: 'stretch',
+    minWidth: 0,
+  },
+  duelStageColumnCompact: {
+    marginBottom: 4,
+  },
+  /** 問題パネル左上の進捗 */
+  boardProgressCorner: {
+    position: 'absolute',
+    top: 12,
+    left: 12,
+    zIndex: 4,
+    maxWidth: '62%',
+  },
+  boardProgressCornerCompact: {
+    top: 7,
+    left: 8,
+    maxWidth: '70%',
+  },
+  /** 問題文（prompt）と同じタイポスケール */
+  boardProgressValue: {
+    fontSize: 20,
+    lineHeight: 30,
+    fontWeight: '800',
+    color: COLORS.text,
+    letterSpacing: 0.4,
+    fontFamily: FONT.display,
+    fontVariant: ['tabular-nums'],
+  },
+  boardProgressValueCompact: {
+    fontSize: 13,
+    lineHeight: 18,
+    letterSpacing: 0.25,
+  },
+  /** 問題カード下端と一体の TIME 帯（独立枠なし） */
+  boardTimeFooter: {
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: 'rgba(198, 167, 94, 0.28)',
+    backgroundColor: 'rgba(23, 35, 52, 0.45)',
+    paddingBottom: 11,
+  },
+  boardTimeFooterCompact: {
+    paddingBottom: 5,
+  },
+  boardTimeFooterHeader: {
+    flexDirection: 'row',
+    alignItems: 'baseline',
+    justifyContent: 'flex-end',
+    paddingHorizontal: 16,
+    paddingTop: 8,
+    paddingBottom: 6,
+  },
+  boardTimeFooterHeaderCompact: {
+    paddingHorizontal: 10,
+    paddingTop: 4,
+    paddingBottom: 3,
+  },
+  matchLimitBarTimer: {
+    fontSize: 23,
+    fontWeight: '800',
+    color: COLORS.gold,
+    letterSpacing: 0.4,
+    fontFamily: FONT.display,
+    fontVariant: ['tabular-nums'],
+  },
+  matchLimitBarTimerCompact: {
+    fontSize: 17,
+    letterSpacing: 0.28,
+  },
+  matchLimitBarTrack: {
+    height: 11,
+    flexDirection: 'row',
+    borderRadius: 5,
+    overflow: 'hidden',
+    marginHorizontal: 14,
+    backgroundColor: 'rgba(6, 10, 18, 0.5)',
+    borderWidth: 1,
+    borderColor: 'rgba(198, 167, 94, 0.3)',
+  },
+  matchLimitBarTrackCompact: {
+    height: 8,
+    marginHorizontal: 10,
+  },
+  matchLimitBarRemain: {
+    backgroundColor: 'rgba(198, 167, 94, 0.74)',
+  },
+  matchLimitBarRemainUrgent: {
+    backgroundColor: 'rgba(190, 155, 95, 0.82)',
+  },
+  matchLimitBarSpent: {
+    backgroundColor: 'rgba(18, 26, 40, 0.62)',
+  },
+  /** 残りわずか：金系に寄せた警告（暖オレンジは抑える） */
+  altarHudTimerUrgent: {
+    color: 'rgba(224, 198, 138, 0.98)',
+  },
+  /** 上段：アイコン／名前対峙 — 問題カード列と同じ親幅にストレッチ */
+  matchIconsPlaque: {
+    marginBottom: 5,
+    width: '100%',
+    alignSelf: 'stretch',
+    minWidth: 0,
+  },
+  matchIconsPlaqueCompact: {
+    marginBottom: 2,
+  },
+  /** 背景は matchIconsFace のみ（リムは枠＋隙間用で塗らない＝二重にならない） */
+  matchIconsRim: {
+    width: '100%',
+    alignSelf: 'stretch',
+    minWidth: 0,
+    padding: 1,
+    borderRadius: 14,
+    backgroundColor: 'transparent',
+    borderWidth: 1,
+    borderColor: 'rgba(198, 167, 94, 0.28)',
+  },
+  matchIconsFace: {
+    width: '100%',
+    alignSelf: 'stretch',
+    minWidth: 0,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 4,
+    paddingVertical: 7,
+    paddingHorizontal: '2.5%',
+    backgroundColor: 'rgba(23, 35, 52, 0.46)',
+    borderRadius: 13,
+    borderWidth: 1,
+    borderColor: '#243349',
+    borderLeftColor: 'rgba(143, 182, 255, 0.18)',
+    borderRightColor: 'rgba(210, 120, 105, 0.18)',
+    overflow: 'visible',
+  },
+  matchIconsFaceCompact: {
+    paddingVertical: 4,
+    paddingHorizontal: '2%',
+    gap: 2,
+  },
+  /** 中央カラム：レイアウト上の最小幅を確保し、左右 flex:1 が潰れないようにする（scale は JSX で可変） */
+  altarVsEmblem: {
+    flexShrink: 0,
+    flexGrow: 0,
+    minWidth: 48,
+    maxWidth: 72,
+    alignItems: 'center',
+    justifyContent: 'center',
+    overflow: 'visible',
+    paddingHorizontal: 2,
+  },
+  altarVsEmblemInner: {
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  altarVsEmblemText: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: COLORS.gold,
+    letterSpacing: 0.35,
+    fontFamily: FONT.display,
+  },
+  towerDuelistLeft: {
+    flex: 1,
+    flexBasis: 0,
+    alignItems: 'center',
+    justifyContent: 'center',
+    minWidth: 56,
+    maxWidth: '42%',
+  },
+  towerDuelistRight: {
+    flex: 1,
+    flexBasis: 0,
+    alignItems: 'center',
+    justifyContent: 'center',
+    minWidth: 56,
+    maxWidth: '42%',
+  },
+  /** 円アイコン＋名下＋ハートの縦積み */
+  towerDuelistStack: {
+    flexDirection: 'column',
+    alignItems: 'center',
+    gap: 6,
+    maxWidth: '100%',
+  },
+  towerDuelistStackCompact: {
+    gap: 3,
+  },
+  towerAvatarRingCompact: {
+    padding: 1,
+    borderWidth: 1.2,
+  },
+  towerDuelistNameUnder: {
+    alignSelf: 'stretch',
+    alignItems: 'center',
+    width: '100%',
+    maxWidth: '100%',
+    minWidth: 0,
+  },
+  towerDuelistNameBelowAvatar: {
+    textAlign: 'center',
+    width: '100%',
+  },
+  towerHeartsBelowName: {
+    alignItems: 'center',
+  },
+  /** 帯の matchIconsFace が既に1枚塗っているのでリングは縁だけ（内側の二重塗りにしない） */
+  towerAvatarRingBlue: {
+    padding: 2,
+    borderRadius: 999,
+    borderWidth: 1.5,
+    borderColor: 'rgba(143, 182, 255, 0.4)',
+    backgroundColor: 'transparent',
+  },
+  towerAvatarRingEmber: {
+    padding: 2,
+    borderRadius: 999,
+    borderWidth: 1.5,
+    borderColor: 'rgba(220, 140, 125, 0.38)',
+    backgroundColor: 'transparent',
+  },
+  towerDuelistName: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: COLORS.text,
+    fontFamily: FONT.body,
+    letterSpacing: 0.2,
+    textShadowColor: 'rgba(2, 6, 14, 0.65)',
+    textShadowOffset: { width: 0, height: 0 },
+    textShadowRadius: 8,
+  },
+  /** 競技盤面の中心：塔・神殿の比喩は使わず、金枠＋濃紺面で主役を問題文に */
+  boardPanelWrap: {
+    marginTop: 6,
+    position: 'relative',
+    width: '100%',
+    minWidth: 0,
+    alignSelf: 'stretch',
+  },
+  boardPanelWrapCompact: {
+    marginTop: 2,
+  },
+  /** 問題＋タイム帯の塗りはここだけ（inner は透明で二重にしない） */
+  boardPanelOuter: {
+    position: 'relative',
+    width: '100%',
+    padding: 10,
+    paddingBottom: 10,
+    backgroundColor: 'rgba(23, 35, 52, 0.48)',
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: 'rgba(198, 167, 94, 0.48)',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.22,
+    shadowRadius: 18,
+    elevation: 7,
+  },
+  boardPanelOuterCompact: {
+    padding: 6,
+    paddingBottom: 6,
+    borderRadius: 12,
+    shadowRadius: 12,
+  },
+  boardPanelInner: {
+    borderRadius: 12,
+    overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    backgroundColor: 'transparent',
+  },
+  /** 盤面上辺の登録線（儀式感は線の精度で） */
+  boardPanelRegisterLine: {
+    position: 'absolute',
+    top: 40,
+    left: 16,
+    right: 16,
+    height: StyleSheet.hairlineWidth,
+    backgroundColor: 'rgba(198, 167, 94, 0.32)',
+    zIndex: 2,
+  },
+  boardPanelRegisterLineCompact: {
+    top: 28,
+    left: 10,
+    right: 10,
+  },
+  hudCard: {
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: 'rgba(198, 167, 94, 0.32)',
+    backgroundColor: COLORS.surface,
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    marginBottom: 14,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.12,
+    shadowRadius: 10,
+    elevation: 2,
   },
   loadingText: {
     marginTop: 16,
@@ -2400,7 +2991,7 @@ const styles = StyleSheet.create({
   },
   countdownOverlay: {
     flex: 1,
-    backgroundColor: COLORS.background,
+    backgroundColor: 'rgba(7, 11, 18, 0.78)',
     justifyContent: 'center',
     alignItems: 'center',
     padding: 24,
@@ -2424,43 +3015,79 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     color: COLORS.gold,
   },
-  header: {
+  headerTop: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 24,
+    marginBottom: 8,
+  },
+  headerBottom: {
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(42, 61, 90, 0.55)',
+    paddingTop: 8,
   },
   questionNumber: {
-    fontSize: 16,
+    fontSize: 11,
     color: COLORS.muted,
+    letterSpacing: 0.65,
+    fontWeight: '600',
+    fontFamily: FONT.body,
+    textTransform: 'uppercase',
   },
   timer: {
+    flexShrink: 0,
     fontSize: 20,
-    fontWeight: 'bold',
-    color: COLORS.incorrect,
+    fontWeight: '800',
+    color: COLORS.gold,
+    letterSpacing: 0.35,
+    fontFamily: FONT.display,
+    fontVariant: ['tabular-nums'],
   },
   livesRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    marginBottom: 16,
+    alignItems: 'center',
+    marginBottom: 0,
+    gap: 8,
   },
   livesText: {
-    fontSize: 16,
-    color: COLORS.text,
+    fontSize: 19,
+    color: 'rgba(228, 238, 255, 0.95)',
+    fontWeight: '600',
+    flexShrink: 1,
+    minWidth: 0,
   },
-  livesHeart: {
-    color: '#E53935',
+  playerNameInline: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    flexShrink: 1,
+    minWidth: 0,
+  },
+  heartsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    flexShrink: 0,
+  },
+  heartIcon: {
+    textAlign: 'center',
+    includeFontPadding: false,
+  },
+  heartIconActive: {
+    color: COLORS.incorrect,
+  },
+  heartIconInactive: {
+    color: 'rgba(164, 176, 196, 0.35)',
   },
   dictationScoreRow: {
     flexDirection: 'row',
     justifyContent: 'center',
     alignItems: 'center',
-    marginBottom: 16,
-    paddingVertical: 8,
-    paddingHorizontal: 16,
-    backgroundColor: COLORS.surface,
-    borderRadius: 8,
-    gap: 12,
+    marginBottom: 0,
+    paddingVertical: 6,
+    paddingHorizontal: 2,
+    gap: 8,
   },
   dictationScoreLabel: {
     fontSize: 18,
@@ -2474,10 +3101,72 @@ const styles = StyleSheet.create({
     fontSize: 16,
     color: COLORS.muted,
   },
+  duelDividerCompact: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexShrink: 0,
+    width: 56,
+    gap: 5,
+  },
+  duelBandVsCompact: {
+    fontSize: 9,
+    fontWeight: '800',
+    color: COLORS.gold,
+    letterSpacing: 1.8,
+    fontFamily: FONT.display,
+  },
+  duelBandLine: {
+    flex: 1,
+    height: 1,
+    maxHeight: 1,
+  },
+  duelBandLineYou: {
+    backgroundColor: 'rgba(143, 182, 255, 0.2)',
+  },
+  duelBandLineOpp: {
+    backgroundColor: 'rgba(220, 130, 118, 0.14)',
+  },
+  /** 問題文：内側は落ち着いた面＋余白（ホームのカード内側に寄せる） */
+  promptScrim: {
+    position: 'relative',
+    zIndex: 1,
+    paddingVertical: 12,
+    paddingHorizontal: 24,
+    backgroundColor: 'transparent',
+    borderRadius: 0,
+  },
+  /** 左上の進捗・区切り線は absolute のため、中央寄せの基準が上に寄る。上 padding で見かけの帯に合わせる */
+  battlefieldContent: {
+    position: 'relative',
+    zIndex: 3,
+    flexGrow: 1,
+    alignSelf: 'stretch',
+    justifyContent: 'center',
+    paddingTop: 52,
+    paddingBottom: 28,
+    paddingHorizontal: 22,
+  },
+  /** 短いビューポート：中央寄せ用の flex 成長をやめ、タイマー直下の選択肢まで詰める */
+  battlefieldContentCompact: {
+    flexGrow: 0,
+    justifyContent: 'flex-start',
+    paddingTop: 22,
+    paddingBottom: 6,
+    paddingHorizontal: 10,
+  },
+  promptScrimCompact: {
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+  },
   playerSide: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
+    gap: 10,
+    flex: 1,
+    minWidth: 0,
+  },
+  playerSideRight: {
+    justifyContent: 'flex-end',
   },
   playerAvatar: {
     width: 36,
@@ -2486,9 +3175,9 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.border,
   },
   playerAvatarSmall: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
+    width: 45,
+    height: 45,
+    borderRadius: 22.5,
     backgroundColor: COLORS.border,
   },
   playerAvatarPlaceholder: {
@@ -2501,86 +3190,324 @@ const styles = StyleSheet.create({
     color: COLORS.muted,
   },
   playerAvatarTextSmall: {
-    fontSize: 14,
+    fontSize: 21,
     fontWeight: '600',
     color: COLORS.muted,
   },
   playerName: {
-    fontSize: 16,
+    fontSize: 13,
     fontWeight: '600',
-    color: COLORS.text,
-    maxWidth: 100,
+    color: '#E4EEFF',
+  },
+  playerMeta: {
+    minWidth: 0,
+    gap: 3,
+  },
+  playerMetaRight: {
+    alignItems: 'flex-end',
   },
   playerValue: {
-    fontSize: 18,
+    fontSize: 16,
     fontWeight: '700',
-    color: COLORS.text,
+    color: 'rgba(223, 234, 255, 0.88)',
+    fontFamily: FONT.display,
+    fontVariant: ['tabular-nums'],
   },
   questionContainer: {
-    marginBottom: 32,
+    marginBottom: 0,
+    borderWidth: 0,
+    borderRadius: 0,
+    backgroundColor: 'transparent',
+    paddingVertical: 0,
+    paddingHorizontal: 0,
+    overflow: 'hidden',
+    position: 'relative',
+    minHeight: 220,
+    shadowOpacity: 0,
+    shadowRadius: 0,
+    shadowOffset: { width: 0, height: 0 },
+    elevation: 0,
   },
   /** リスニング時は問題文エリアの高さを固定し、回答前後・他端末の回答有無で選択肢の位置がずれないようにする */
   questionContainerListening: {
-    height: 88,
-    justifyContent: 'center',
+    minHeight: 204,
   },
-  prompt: {
-    fontSize: 18,
-    lineHeight: 28,
+  questionContainerDictation: {
+    minHeight: 212,
+  },
+  dictationInCardColumn: {
+    width: '100%',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 12,
+    paddingVertical: 6,
+    paddingHorizontal: 4,
+  },
+  dictationInstructionText: {
+    fontSize: 15,
+    lineHeight: 22,
+    color: COLORS.muted,
+    fontWeight: '600',
+    textAlign: 'center',
+    fontFamily: FONT.body,
+  },
+  dictationDisplayTextInCard: {
+    fontSize: 26,
+    fontWeight: '700',
+    letterSpacing: 3,
+    textAlign: 'center',
     color: COLORS.text,
+    fontFamily: FONT.display,
+  },
+  dictationDisplayCharInCard: {
+    color: COLORS.correct,
+    fontWeight: '800',
+  },
+  dictationPlaceholderInCard: {
+    color: 'rgba(100, 116, 148, 0.55)',
+    fontWeight: '700',
+  },
+  dictationInputMatch: {
+    borderWidth: 1.5,
+    borderColor: 'rgba(198, 167, 94, 0.55)',
+    borderRadius: 14,
+    paddingVertical: 14,
+    paddingHorizontal: 16,
+    fontSize: 18,
+    marginBottom: 14,
+    backgroundColor: 'rgba(23, 35, 52, 0.52)',
+    color: COLORS.text,
+    fontFamily: FONT.body,
+  },
+  dictationResultMatch: {
+    maxHeight: 180,
+  },
+  dictationResultCorrectLabel: {
+    color: COLORS.correct,
+  },
+  dictationResultIncorrectLabel: {
+    color: COLORS.incorrect,
+  },
+  dictationResultAnswerLead: {
+    fontWeight: '700',
+    color: COLORS.gold,
+  },
+  /** タイム表示（matchLimitBarTimer）と同じ段のサイズ・ウエイト・字間・書体 */
+  prompt: {
+    fontSize: 23,
+    lineHeight: 34,
+    color: COLORS.text,
+    letterSpacing: 0.4,
+    fontWeight: '800',
+    textAlign: 'center',
+    fontFamily: FONT.display,
+    textShadowColor: 'rgba(2, 6, 14, 0.72)',
+    textShadowOffset: { width: 0, height: 0 },
+    textShadowRadius: 10,
+  },
+  /** 回答前：決断前の静かな主役感（装飾ではなく視線の重み） */
+  promptLive: {
+    textShadowColor: 'rgba(198, 167, 94, 0.26)',
+    textShadowOffset: { width: 0, height: 0 },
+    textShadowRadius: 22,
+  },
+  promptCompact: {
+    fontSize: 17,
+    lineHeight: 24,
+    textShadowRadius: 8,
+  },
+  promptListeningCueCompact: {
+    fontSize: 13,
+    lineHeight: 20,
+  },
+  promptListeningCue: {
+    fontSize: 17,
+    lineHeight: 28,
+    color: COLORS.muted,
+    letterSpacing: 0.4,
+    fontWeight: '600',
+    textAlign: 'center',
+    fontFamily: FONT.body,
+    textTransform: 'uppercase',
   },
   choicesContainer: {
-    gap: 12,
-    marginBottom: 24,
+    gap: 11,
+    marginBottom: 14,
+    zIndex: 1,
+    width: '100%',
+    maxWidth: '100%',
+    minWidth: 0,
+    alignSelf: 'stretch',
+  },
+  choicesContainerCompact: {
+    gap: 5,
+    marginBottom: 4,
   },
   /** 解説・次へボタンの領域。高さを固定し、回答の有無・どちらの端末が先に回答しても選択肢の位置がずれないようにする */
   afterChoicesArea: {
     height: 200,
   },
-  choice: {
-    padding: 16,
-    borderRadius: 8,
-    borderWidth: 2,
+  /** 選択：決断の重みを優先。色帯は使わず縁と影で競技パネル感 */
+  altarCommandPlate: {
+    borderRadius: 14,
+    borderWidth: 1,
+    minHeight: 62,
+    justifyContent: 'center',
     borderColor: COLORS.border,
-    backgroundColor: COLORS.surface,
+    borderTopColor: 'rgba(198, 167, 94, 0.2)',
+    backgroundColor: 'rgba(23, 35, 52, 0.48)',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 5 },
+    shadowOpacity: 0.24,
+    shadowRadius: 10,
+    elevation: 5,
   },
-  choiceSelected: {
-    borderColor: COLORS.gold,
-    backgroundColor: COLORS.primaryHover,
+  altarCommandPlateCompact: {
+    minHeight: 44,
+    borderRadius: 11,
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.18,
+    shadowRadius: 6,
+  },
+  /** 選択肢左ストライプ：金系で統一 */
+  choiceTowerStripe: {
+    borderLeftWidth: 3,
+    borderLeftColor: 'rgba(198, 167, 94, 0.36)',
+  },
+  altarCommandRow: {
+    flexDirection: 'row',
+    alignItems: 'stretch',
+    paddingVertical: 4,
+    paddingHorizontal: 12,
+    gap: 4,
+  },
+  altarCommandRowCompact: {
+    paddingVertical: 1,
+    paddingHorizontal: 8,
+    gap: 2,
+  },
+  /** レタープレート：A–D は金系で統一（正誤時のみ緑/赤） */
+  altarCommandShield: {
+    width: 60,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 13,
+    borderWidth: 1.65,
+    flexShrink: 0,
+  },
+  altarCommandShieldCompact: {
+    width: 40,
+    borderRadius: 9,
+    borderWidth: 1.35,
+  },
+  altarCommandBody: {
+    flex: 1,
+    justifyContent: 'center',
+    paddingVertical: 6,
+    paddingLeft: 4,
+    minWidth: 0,
+  },
+  altarCommandBodyCompact: {
+    paddingVertical: 2,
+    paddingLeft: 2,
+  },
+  choiceBadgeLetter: {
+    borderColor: 'rgba(198, 167, 94, 0.58)',
+    backgroundColor: 'rgba(10, 14, 22, 0.45)',
+  },
+  choiceLetterBadgeSelected: {
+    borderColor: 'rgba(198, 167, 94, 0.75)',
+    backgroundColor: 'rgba(67, 51, 25, 0.48)',
+  },
+  choiceLetterBadgeCorrect: {
+    borderColor: 'rgba(74, 222, 128, 0.7)',
+    backgroundColor: 'rgba(16, 66, 44, 0.62)',
+  },
+  choiceLetterBadgeIncorrect: {
+    borderColor: 'rgba(248, 113, 113, 0.7)',
+    backgroundColor: 'rgba(88, 29, 29, 0.6)',
+  },
+  choiceLetter: {
+    fontSize: 24,
+    fontWeight: '800',
+    color: COLORS.gold,
+    letterSpacing: 0.4,
+    fontFamily: FONT.display,
+  },
+  choiceLetterCompact: {
+    fontSize: 17,
+    letterSpacing: 0.25,
+  },
+  /** 回答確定前：金枠でホームの ranked 系の強調に揃える */
+  choiceSelectedLocked: {
+    borderColor: 'rgba(198, 167, 94, 0.75)',
+    backgroundColor: 'rgba(30, 45, 68, 0.42)',
+    borderWidth: 1.5,
+    borderLeftWidth: 2,
+    borderLeftColor: 'rgba(198, 167, 94, 0.65)',
+  },
+  choicePressed: {
+    opacity: 0.98,
+    borderColor: 'rgba(198, 167, 94, 0.62)',
+    borderTopColor: 'rgba(198, 167, 94, 0.42)',
+    transform: [{ scale: 0.987 }],
+  },
+  choicePressedCommitted: {
+    transform: [{ scale: 0.996 }],
+    opacity: 0.98,
   },
   choiceCorrect: {
-    borderColor: COLORS.correct,
-    backgroundColor: 'rgba(74, 222, 128, 0.15)',
+    borderColor: 'rgba(74, 222, 128, 0.85)',
+    backgroundColor: 'rgba(14, 52, 36, 0.42)',
+    borderLeftWidth: 3,
+    borderLeftColor: 'rgba(74, 222, 128, 0.75)',
   },
   choiceIncorrect: {
-    borderColor: COLORS.incorrect,
-    backgroundColor: 'rgba(248, 113, 113, 0.15)',
+    borderColor: 'rgba(248, 113, 113, 0.82)',
+    backgroundColor: 'rgba(72, 24, 24, 0.38)',
+    borderLeftWidth: 3,
+    borderLeftColor: 'rgba(251, 113, 133, 0.75)',
   },
   choiceDisabled: {
-    opacity: 0.5,
+    opacity: 0.55,
   },
   choiceText: {
-    fontSize: 16,
+    flex: 1,
+    fontSize: 23,
     color: COLORS.text,
+    lineHeight: 30,
+    fontWeight: '700',
+    letterSpacing: 0.14,
+    fontFamily: FONT.body,
+    textShadowColor: 'rgba(2, 6, 14, 0.55)',
+    textShadowOffset: { width: 0, height: 0 },
+    textShadowRadius: 6,
+  },
+  choiceTextCompact: {
+    fontSize: 16,
+    lineHeight: 21,
+    letterSpacing: 0.08,
   },
   choiceTextSelected: {
     color: COLORS.gold,
-    fontWeight: '600',
+    fontWeight: '700',
   },
   choiceTextCorrect: {
     color: COLORS.correct,
-    fontWeight: '600',
+    fontWeight: '700',
   },
   choiceTextIncorrect: {
     color: COLORS.incorrect,
-    fontWeight: '600',
+    fontWeight: '700',
   },
   explanationContainer: {
-    marginTop: 24,
+    marginTop: 16,
     padding: 16,
-    backgroundColor: COLORS.surface,
-    borderRadius: 8,
-    maxHeight: 100,
+    backgroundColor: 'rgba(16, 23, 34, 0.58)',
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    maxHeight: 112,
   },
   explanationScroll: {
     flexGrow: 0,
@@ -2593,32 +3520,43 @@ const styles = StyleSheet.create({
   },
   explanation: {
     fontSize: 14,
-    color: COLORS.muted,
-    lineHeight: 20,
+    color: '#AEC0DD',
+    lineHeight: 21,
   },
   nextButton: {
-    marginTop: 24,
-    padding: 16,
-    backgroundColor: COLORS.primary,
-    borderRadius: 8,
+    marginTop: 16,
+    paddingVertical: 14,
+    paddingHorizontal: 16,
+    backgroundColor: 'rgba(30, 45, 68, 0.58)',
+    borderRadius: 14,
     alignItems: 'center',
     borderWidth: 1,
-    borderColor: COLORS.gold,
+    borderColor: 'rgba(198, 167, 94, 0.5)',
   },
   nextButtonText: {
     color: COLORS.gold,
     fontSize: 16,
-    fontWeight: '600',
+    fontWeight: '700',
+    letterSpacing: 0.4,
+    fontFamily: FONT.body,
   },
   replayButton: {
     alignSelf: 'flex-end',
-    padding: 12,
-    marginBottom: 20,
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    marginBottom: 14,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(198, 167, 94, 0.4)',
+    backgroundColor: 'rgba(16, 23, 34, 0.55)',
   },
   replayButtonText: {
     color: COLORS.gold,
-    fontSize: 16,
+    fontSize: 13,
     fontWeight: '600',
+    fontFamily: FONT.body,
+    letterSpacing: 0.5,
+    textTransform: 'uppercase',
   },
   dictationDisplayArea: {
     backgroundColor: COLORS.surface,

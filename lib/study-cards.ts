@@ -116,7 +116,9 @@ export async function updateStudyDeck(
 export async function deleteStudyDeck(deckId: string): Promise<void> {
   const decks = await loadDecks();
   const filtered = decks.filter((d) => d.id !== deckId);
-  if (filtered.length === decks.length) return; // not found
+  if (filtered.length === decks.length) {
+    throw new Error('Deck not found');
+  }
   await saveDecks(filtered);
   await AsyncStorage.removeItem(STORAGE_KEY_CARDS_PREFIX + deckId);
   await AsyncStorage.removeItem(STORAGE_KEY_REVIEW_ORDER_PREFIX + deckId);

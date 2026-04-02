@@ -3,13 +3,14 @@
  * デッキ一覧表示。各デッキに追加・復習・一覧ボタン
  */
 
-import { View, Text, StyleSheet, TouchableOpacity, ScrollView, ActivityIndicator, Alert, TextInput } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, ScrollView, ActivityIndicator, TextInput } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter, useFocusEffect } from 'expo-router';
 import { useState, useCallback } from 'react';
 import { getStudyDecks, getStudyCardCounts, getStudyCardCountsByExpressionType, createStudyDeck, deleteStudyDeck } from '../../lib/study-cards';
 import { EXPRESSION_TYPE_LABELS } from '../../types/study-card';
 import { COLORS } from '../../lib/theme';
+import { alertMessage, confirmAsync } from '../../lib/platform-dialog';
 
 export default function StudyCardsTop() {
   const insets = useSafeAreaInsets();
@@ -65,31 +66,37 @@ export default function StudyCardsTop() {
       await createStudyDeck(name);
       await load();
     } catch (e) {
-      Alert.alert('Error', e instanceof Error ? e.message : 'Failed to create deck');
+      alertMessage('Error', e instanceof Error ? e.message : 'Failed to create deck');
     }
   };
 
   const handleDeleteDeck = (deck: { id: string; name: string; total: number }) => {
-    Alert.alert(
-      'Delete deck',
-      `Delete "${deck.name}"? This will remove all ${deck.total} cards.`,
-      [
-        { text: 'Cancel', style: 'cancel' },
-        { text: 'Delete', style: 'destructive', onPress: async () => {
-          try {
-            await deleteStudyDeck(deck.id);
-            await load();
-          } catch (e) {
-            Alert.alert('Error', e instanceof Error ? e.message : 'Failed to delete deck');
-          }
-        } },
-      ]
-    );
+    void (async () => {
+      const ok = await confirmAsync({
+        title: 'Delete deck',
+        message: `Delete "${deck.name}"? This will remove all ${deck.total} cards.`,
+        confirmText: 'Delete',
+        cancelText: 'Cancel',
+        destructive: true,
+      });
+      if (!ok) return;
+      try {
+        await deleteStudyDeck(deck.id);
+        await load();
+      } catch (e) {
+        alertMessage('Error', e instanceof Error ? e.message : 'Failed to delete deck');
+      }
+    })();
   };
+
+  const goBackToStudy = useCallback(() => {
+    // Web ではモーダル的な push のあと router.back() が効かないことがあるため Study へ明示遷移
+    router.replace('/(tabs)/study' as const);
+  }, [router]);
 
   return (
     <ScrollView style={[styles.container, { paddingTop: insets.top + 16 }]} contentContainerStyle={styles.content}>
-      <TouchableOpacity style={styles.backButton} onPress={() => router.back()}>
+      <TouchableOpacity style={styles.backButton} onPress={goBackToStudy}>
         <Text style={styles.backText}>← Back</Text>
       </TouchableOpacity>
 

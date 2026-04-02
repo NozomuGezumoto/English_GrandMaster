@@ -3,23 +3,34 @@
  * 1行1カード。形式: 英文[TAB/]日本語メモ または 英文のみ
  */
 
-import { View, Text, StyleSheet, TextInput, TouchableOpacity, ScrollView, Alert } from 'react-native';
+import { View, Text, StyleSheet, TextInput, TouchableOpacity, ScrollView } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import { useState, useEffect } from 'react';
 import { createStudyCardsBulk } from '../../lib/study-cards';
 import { EXPRESSION_TYPE_LABELS, type StudyCardExpressionType } from '../../types/study-card';
 import { COLORS } from '../../lib/theme';
+import { alertMessage, alertWithOkButton } from '../../lib/platform-dialog';
 
-/** 日本語ラベル → 表現タイプの逆引き */
+/** UI ラベル（Noun 等）→ 表現タイプの逆引き */
 const LABEL_TO_TYPE: Record<string, StudyCardExpressionType> = Object.fromEntries(
   (Object.entries(EXPRESSION_TYPE_LABELS) as [StudyCardExpressionType, string][]).map(([k, v]) => [v, k])
 );
 
+const EXPRESSION_TYPE_KEYS = Object.keys(EXPRESSION_TYPE_LABELS) as StudyCardExpressionType[];
+
 function parseExpressionType(label: string): StudyCardExpressionType | null {
   const t = label.trim();
   if (!t) return null;
-  return LABEL_TO_TYPE[t] ?? null;
+  if (LABEL_TO_TYPE[t]) return LABEL_TO_TYPE[t];
+  const lower = t.toLowerCase();
+  for (const [enLabel, key] of Object.entries(LABEL_TO_TYPE) as [string, StudyCardExpressionType][]) {
+    if (enLabel.toLowerCase() === lower) return key;
+  }
+  for (const key of EXPRESSION_TYPE_KEYS) {
+    if (key === lower) return key;
+  }
+  return null;
 }
 
 function parseBulkInput(text: string): { englishText: string; japaneseNote: string; expressionType: StudyCardExpressionType | null }[] {
@@ -30,8 +41,11 @@ function parseBulkInput(text: string): { englishText: string; japaneseNote: stri
     const trimmed = line.trim();
     if (!trimmed) continue;
 
-    // Tab / スラッシュ / ハイフン / コロン で分割（最大3分割: 英文 / 日本語 / 品詞）
-    const parts = trimmed.split(/\t|\s*\/\s*|\s*[－－-]\s+|\s*[：:]\s*/).map((p) => p.trim()).filter(Boolean);
+    // Tab / カンマ / スラッシュ / ハイフン / コロン で分割（英文 / 日本語 / 品詞）
+    const parts = trimmed
+      .split(/\t|\s*,\s*|\s*\/\s*|\s*[－－-]\s+|\s*[：:]\s*/)
+      .map((p) => p.trim())
+      .filter(Boolean);
     const english = parts[0] ?? '';
     const japanese = parts[1] ?? '';
     const expressionType = parseExpressionType(parts[2] ?? '');
@@ -58,17 +72,22 @@ export default function BulkCreateStudyCardsScreen() {
     if (!deckId) return;
     const items = parseBulkInput(input);
     if (items.length === 0) {
-      Alert.alert('Input error', 'Enter one card per line.\nExample:\nWord / word / Noun\nimprove / to make better / Verb');
+      alertMessage(
+        'Input error',
+        'Enter one card per line.\nExample:\nWord / word / Noun\nimprove / to make better / Verb'
+      );
       return;
     }
     setSaving(true);
     try {
       const { created, skipped } = await createStudyCardsBulk(deckId, items);
-      Alert.alert('Done', `Registered ${created} cards${skipped > 0 ? `\n${skipped} skipped` : ''}`, [
-        { text: 'OK', onPress: () => router.replace(`/study-cards/list?deckId=${deckId}`) },
-      ]);
+      const detail =
+        skipped > 0
+          ? `Registered ${created} card(s).\n${skipped} line(s) skipped.`
+          : `Registered ${created} card(s).`;
+      alertWithOkButton('Done', detail, () => router.replace(`/study-cards/list?deckId=${deckId}`));
     } catch (e) {
-      Alert.alert('Error', e instanceof Error ? e.message : 'Failed to save');
+      alertMessage('Error', e instanceof Error ? e.message : 'Failed to save');
     } finally {
       setSaving(false);
     }
@@ -88,7 +107,8 @@ export default function BulkCreateStudyCardsScreen() {
 
       <Text style={styles.title}>Bulk Add</Text>
       <Text style={styles.hint}>
-        One card per line. Use Tab, &quot;/&quot;, &quot;-&quot;, or &quot;:&quot; to separate. 3rd column: expression type.
+        One card per line. Separate columns with Tab, comma, &quot;/&quot;, &quot;-&quot;, or &quot;:&quot;. 3rd column:
+        expression type (e.g. Noun).
       </Text>
 
       <View style={styles.typeBlock}>
@@ -100,6 +120,7 @@ export default function BulkCreateStudyCardsScreen() {
 
       <Text style={styles.example}>Example:</Text>
       <View style={styles.exampleBlock}>
+        <Text style={styles.exampleLine}>deadline, 締め切り, noun</Text>
         <Text style={styles.exampleLine}>Word / word / Noun</Text>
         <Text style={styles.exampleLine}>improve / to improve / Verb</Text>
         <Text style={styles.exampleLine}>We need to improve. / need to improve / Phrase</Text>

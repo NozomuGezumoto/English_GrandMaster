@@ -12,8 +12,11 @@ const MAX_ITEMS = 200;
 
 export interface StudyWrongDictationEntry {
   word: string;
-  level: number; // ToeicLevel の数値 (400, 600, ...)
+  level: number; // ToeicLevel の数値 (400, 600, ...)。マイ単語帳時は 0
   wrongAt: number;
+  /** マイ単語帳ディクテのときのみ */
+  deckId?: string;
+  deckName?: string;
 }
 
 export interface StudyWrongListeningEntry {
